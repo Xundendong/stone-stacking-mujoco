@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+.venv/
+
+logs/
+reports/
+outputs/
+
+*.mp4
+*.mjb
+*.pdf
