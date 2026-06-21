@@ -1,59 +1,87 @@
 # MuJoCo Robotic Dry-Stone Stacking
 
-这是一个用于机械臂抓取天然石块并干叠成墙的 MuJoCo 复现实验项目。当前目标不是做展示动画，而是在仿真里建立一条可运行、可验证、可继续扩展的复现路线：
+MuJoCo research prototype for robotic dry-stone wall construction with
+irregular natural stones. The current implementation combines procedural stone
+generation, stability-based sequence planning, and contact-rich manipulation by
+an articulated UR5e arm with a Robotiq 2F-140 gripper.
+
+The project is intended as a reproducible simulation baseline for studying how
+a robot can select, grasp, transport, and place irregular stones without mortar.
+It is not a rendering-only animation: stone transport uses MuJoCo contact and
+friction at the gripper pads, and each placed stone is released and settled
+under gravity.
+
+![Final dry-stone wall executed with UR5e and Robotiq in MuJoCo](docs/assets/official_ur5e_wall_snapshot.png)
+
+## Scope
+
+This repository implements a truth-state simulation pipeline for dry-stone
+stacking:
 
 ```text
-From Rocks to Walls 风格石头生成
--> Stability-Based Sequence Planning 风格稳定性序列规划
--> ICRA 2017 风格真值 next-best object / target-pose 搜索
--> UR5e + Robotiq 2F-140 在 MuJoCo 中接触抓取、搬运、释放、沉降
+procedural irregular stone generation
+-> stability-aware wall sequence planning
+-> next-best object and target-pose selection
+-> UR5e + Robotiq contact grasping in MuJoCo
+-> release, settling, and success evaluation
 ```
 
-当前主 demo 已经可以在 MuJoCo viewer 中看到 UR5e 机械臂使用 Robotiq 夹爪逐块抓取 6 块不规则石头，并堆成 `3 + 2 + 1` 的干叠小墙。石头不是 weld 到夹爪上的，搬运阶段依靠 Robotiq 指尖/指腹碰撞几何和摩擦接触。
+The current default task builds a `3 + 2 + 1` dry-stone wall using six selected
+stones. A seventh generated stone is available to the planner but filtered out
+or left unused depending on the sequence result.
 
-![UR5e Robotiq dry-stone wall snapshot](docs/assets/official_ur5e_wall_snapshot.png)
+## Research Basis
 
-## 当前状态
+The implementation follows ideas from three related lines of work:
 
-已实现：
+- **From Rocks to Walls: A Model-free Reinforcement Learning Approach to Dry
+  Stacking with Irregular Rocks**
+  - Used here for procedural irregular rock generation.
+  - The DQN policy is intentionally not reproduced in this project.
 
-- From Rocks to Walls 风格的程序化天然石块生成：长方体种子、网格细分、截断正态顶点扰动、凸包、OBB 对齐、随机密度。
-- 稳定性序列规划：按层选择石头顺序，使用支撑面积、接触数量、目标误差、法向偏差、扰动测试等指标筛选候选。
-- ICRA 2017 风格的真值规划框架：已知石头几何和姿态，在线选择下一块石头和目标位姿。
-- MuJoCo 接触仿真：重力、碰撞、摩擦、释放后沉降都在物理引擎里发生。
-- UR5e + Robotiq 2F-140 执行层：使用 robosuite MJCF 模型、MuJoCo Jacobian IK、Robotiq 位置执行器和真实接触抓取。
-- 6 块石头 `3 + 2 + 1` 墙体执行 demo，当前默认参数验证通过。
+- **Autonomous Robotic Stone Stacking with Online Next Best Object Target Pose
+  Planning**
+  - Used here for the truth-state next-best object and target-pose planning
+    structure.
+  - Camera perception, point-cloud pose estimation, MoveIt, and the original
+    UR10 hardware system are outside the current implementation.
 
-还没有实现：
+- **Stability-Based Sequence Planning for Robotic Dry-Stacking of Natural
+  Stones**
+  - Used here for stability-aware sequence selection: candidate stones and
+    target poses are evaluated with support, contact, geometric error, and
+    disturbance-survival criteria before execution.
 
-- RGB-D 感知、点云分割、ICP 或实际石头姿态估计。
-- MoveIt / OMPL 级别的完整无碰撞运动规划。
-- 力控放置或力矩传感器反馈。
-- 真实扫描石头数据集。
-- From Rocks to Walls 的 DQN 训练。当前路线明确不做 DQN，而是用其石头生成方法。
+PDFs are intentionally ignored by Git. Keep papers locally if needed, but do
+not commit copyrighted full papers to a public repository.
 
-当前是一个可运行的研究原型，不是论文的一比一硬件复现。它适合继续扩展到更真实的感知、抓取候选生成、力控放置和真实石头 mesh。
+## Current Capabilities
 
-## 参考论文
+Implemented:
 
-本项目主要参考三条路线：
+- Procedural irregular stones using subdivision, truncated-normal vertex
+  displacement, convex hull reconstruction, OBB alignment, and randomized
+  density.
+- Stability-based course planning for a `3,2,1` wall.
+- Truth-state object and target-pose search in MuJoCo.
+- Gravity, contact, friction, release, and settling simulation.
+- Articulated UR5e execution using MuJoCo Jacobian IK.
+- Robotiq 2F-140 contact grasping with actuated finger joints.
+- No weld or attach constraint between the gripper and stones during transport.
+- Clean UR5e visualization that preserves robosuite assembled visual meshes and
+  hides only robot collision geoms.
 
-- `From Rocks to Walls: A Model-free Reinforcement Learning Approach to Dry Stacking with Irregular Rocks`
-  - 当前只采用其中的程序化不规则石头生成思路。
-  - 不复现 DQN。
+Not implemented yet:
 
-- `Autonomous Robotic Stone Stacking with Online Next Best Object Target Pose Planning`
-  - 当前采用其 truth-state next-best object / target-pose 搜索结构。
-  - 当前不包含 RGB-D 感知、UR10 实机系统和 MoveIt。
+- RGB-D perception, segmentation, ICP, or online pose estimation.
+- Full collision-free motion planning with OMPL/MoveIt-style planning.
+- Force/torque-triggered placement control.
+- Real scanned stone meshes and measured inertial parameters.
+- Reinforcement learning policy training.
 
-- `Stability-Based Sequence Planning for Robotic Dry-Stacking of Natural Stones`
-  - 当前采用稳定性序列规划思想：候选石头和候选位姿先经过支撑/接触/扰动稳定性评估，再提交到执行层。
+## Installation
 
-论文 PDF 建议本地保存阅读，不建议直接上传公开 GitHub 仓库；本仓库默认通过 `.gitignore` 忽略 `*.pdf`。
-
-## 环境要求
-
-推荐 Python 3.10 或 3.11。
+Python 3.10 or 3.11 is recommended.
 
 ```bash
 cd /home/xunden/stone-stacking-mujoco
@@ -63,55 +91,37 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-验证 MuJoCo：
+Check MuJoCo:
 
 ```bash
 python -c "import mujoco; print(mujoco.__version__)"
 ```
 
-当前 UR5e 和 Robotiq 模型来自本机 robosuite 资源路径：
+## Robot Assets
+
+The execution layer currently uses local robosuite MJCF assets:
 
 ```text
-/home/xunden/isaac-sim/kit/python/lib/python3.11/site-packages/robosuite/models/assets/robots/ur5e/robot.xml
-/home/xunden/isaac-sim/kit/python/lib/python3.11/site-packages/robosuite/models/assets/grippers/robotiq_gripper_140.xml
+robots/ur5e/robot.xml
+grippers/robotiq_gripper_140.xml
 ```
 
-如果在别的机器上运行，需要安装 robosuite 资产，或者把 `scripts/run_official_ur5e_robotiq_grasp_test.py` 里的资产路径改成对应机器上的路径。
-
-## 快速运行最终 demo
-
-运行下面命令会打开 MuJoCo viewer。可以看到机械臂抓取 6 块石头并堆成 `3 + 2 + 1` 小墙：
-
-```bash
-cd /home/xunden/stone-stacking-mujoco
-source .venv/bin/activate
-python scripts/run_official_ur5e_robotiq_wall_stack.py \
-  --report reports/stability_sequence_planner.json \
-  --max-placements 6 \
-  --robot-visual clean \
-  --view
-```
-
-当前默认执行参数已经调好：
+In the current development machine these assets are loaded from:
 
 ```text
-Robotiq close command: 0.32
-bottom-course place clearance: 0.010 m
-upper-course place clearance: -0.045 m
-robot visual: clean
+/home/xunden/isaac-sim/kit/python/lib/python3.11/site-packages/robosuite/models/assets
 ```
 
-不要再传旧的：
+If you run this repository on another machine, install robosuite assets or
+update the asset paths in:
 
-```bash
---upper-place-clearance -0.035
+```text
+scripts/run_official_ur5e_robotiq_grasp_test.py
 ```
 
-旧参数容易让顶层石头落低。当前默认 `-0.045` 已验证更稳。
+## Quick Start
 
-## 重新生成规划结果
-
-先运行稳定性序列规划：
+Generate a stability-based wall plan:
 
 ```bash
 cd /home/xunden/stone-stacking-mujoco
@@ -119,33 +129,31 @@ source .venv/bin/activate
 python scripts/run_stability_sequence_planner.py
 ```
 
-默认输出：
+This writes:
 
 ```text
 reports/stability_sequence_planner.json
 outputs/stability_sequence_planner_final.xml
 ```
 
-默认规划参数：
-
-```text
-stone_seed: 17
-stones: 7
-courses: 3,2,1
-rock_irregularity: 1.0
-rock_subdivisions: 5
-max_grasp_mass: 3.20 kg
-```
-
-当前默认规划层会生成 7 块候选石头，从中选择 6 块组成 `3 + 2 + 1` 墙体。然后执行层读取该报告，让 UR5e + Robotiq 逐块抓取、搬运、释放。
-
-## Headless 验证
-
-不打开 viewer，直接跑最终执行验证：
+Run the UR5e + Robotiq execution demo:
 
 ```bash
-cd /home/xunden/stone-stacking-mujoco
-source .venv/bin/activate
+python scripts/run_official_ur5e_robotiq_wall_stack.py \
+  --report reports/stability_sequence_planner.json \
+  --max-placements 6 \
+  --robot-visual clean \
+  --view
+```
+
+The MuJoCo viewer will show the robot grasping, transporting, and placing six
+irregular stones into a `3 + 2 + 1` dry-stone wall.
+
+## Headless Verification
+
+Run the same execution without opening the viewer:
+
+```bash
 python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --report reports/stability_sequence_planner.json \
   --max-placements 6 \
@@ -154,7 +162,16 @@ python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --output-json reports/official_ur5e_robotiq_default_safe_queue_6.json
 ```
 
-当前已验证输出：
+Verified result on the current development setup:
+
+```text
+success: true
+placed_count: 6
+stacked_count: 6
+final_center_height_m: 0.18965227759944397
+```
+
+The corresponding placement trace is:
 
 ```text
 placement=1 stone=rock_wall_06 course=0 lifted=0.092 placed=True
@@ -163,76 +180,90 @@ placement=3 stone=rock_wall_07 course=0 lifted=0.069 placed=True
 placement=4 stone=rock_wall_03 course=1 lifted=0.112 placed=True
 placement=5 stone=rock_wall_02 course=1 lifted=0.127 placed=True
 placement=6 stone=rock_wall_01 course=2 lifted=0.114 placed=True
-
-success: true
-placed_count: 6
-stacked_count: 6
-final_center_height_m: 0.18965227759944397
 ```
 
-## 渲染结果图片
+## Important Execution Parameters
 
-运行下面命令可以从最终执行报告渲染一张 README 使用的静态图：
+The current stable defaults are:
+
+```text
+Robotiq close command: 0.32 rad
+bottom-course place clearance: 0.010 m
+upper-course place clearance: -0.045 m
+settle time after release: 0.80 s
+```
+
+These defaults were tuned to reduce two common failure modes:
+
+- excessive lateral squeezing of sloped irregular stones by the gripper;
+- top-course stones settling too low after release.
+
+If these parameters are changed, rerun the headless verification before using
+the result as a baseline.
+
+## Rendering the Result
+
+Generate the README snapshot from the final execution report:
 
 ```bash
-cd /home/xunden/stone-stacking-mujoco
-source .venv/bin/activate
 python scripts/render_wall_stack_snapshot.py \
   --xml outputs/official_ur5e_robotiq_default_safe_queue_6.xml \
   --report reports/official_ur5e_robotiq_default_safe_queue_6.json \
   --output docs/assets/official_ur5e_wall_snapshot.png
 ```
 
-注意：执行层的 XML 是初始仿真场景，最终石头姿态在 JSON 报告里。因此渲染脚本会读取 JSON 中每块石头的 `final_pos` 和 `final_quat`，再更新 MuJoCo `freejoint` 后渲染。
+The execution XML contains the initial simulation scene, while the final stone
+poses are stored in the JSON report. The renderer therefore restores every
+stone from `final_pos` and `final_quat` before rendering the final wall.
 
-## 关键脚本
+## Repository Structure
 
 ```text
-stone_stack/rock_wall_stones.py
-  From Rocks to Walls 风格石头生成。
+stone_stack/
+  rock_wall_stones.py       procedural irregular stone generation
+  rocks.py                  stone geometry utilities
+  paper_scene.py            MuJoCo scene construction utilities
 
-scripts/run_stability_sequence_planner.py
-  当前主规划层：生成石头、搜索序列、做稳定性筛选，输出 wall plan。
+scripts/
+  run_stability_sequence_planner.py
+      stability-based wall sequence planner
 
-scripts/run_official_ur5e_robotiq_wall_stack.py
-  当前主执行层：UR5e + Robotiq 接触抓取、搬运、放置、释放、沉降。
+  run_official_ur5e_robotiq_wall_stack.py
+      main UR5e + Robotiq wall execution script
 
-scripts/run_official_ur5e_robotiq_grasp_test.py
-  单石头 Robotiq 接触抓取测试，以及 UR5e/Robotiq MJCF 工具函数。
+  run_official_ur5e_robotiq_grasp_test.py
+      single-stone Robotiq contact-grasp test and shared robot utilities
 
-scripts/render_wall_stack_snapshot.py
-  从最终执行报告渲染静态结果图。
+  render_wall_stack_snapshot.py
+      final-wall still-image renderer
+
+docs/
+  implementation notes and README assets
 ```
 
-## 当前实现中的重要修正
+## Design Notes
 
-最近几处对稳定性影响很大：
+The simulation currently assumes truth-state access to:
 
-- `--close` 默认从 `0.38` 放松到 `0.32`，减少夹爪把斜面石头横向挤飞。
-- 初始待抓石头使用唯一队列位置，避免两块石头一开始重叠导致 MuJoCo 接触求解把石头弹飞。
-- `--upper-place-clearance` 默认改为 `-0.045`，上层石头比旧参数更稳定。
-- `--robot-visual clean` 只隐藏 UR5e collision geoms，保留 robosuite 原装 assembled visual geoms，避免机械臂视觉模型错位。
+- stone meshes;
+- stone poses;
+- candidate target poses;
+- final post-settling states.
 
-## 项目限制
+This is deliberate. The present goal is to isolate the mechanics of planning,
+grasping, transporting, releasing, and stabilizing irregular stones before
+adding perception. The next natural research steps are:
 
-当前 demo 使用真值状态：
+- point-cloud segmentation and pose estimation for unstructured stone piles;
+- grasp-candidate generation over irregular convex meshes;
+- force/contact-triggered placement termination;
+- collision-aware arm motion planning;
+- real scanned stone meshes and measured inertial parameters;
+- sim-to-real validation with a physical UR arm and Robotiq gripper.
 
-- 已知每块石头 mesh。
-- 已知每块石头在仿真中的位姿。
-- 抓取方向和放置目标来自规划报告。
-- 没有真实相机输入。
+## Generated Files
 
-这不是缺陷，而是当前复现阶段的边界。下一阶段可以在这个基础上逐步加入：
-
-- 点云石头识别和姿态估计。
-- 抓取候选生成和评分。
-- 放置过程中的力/接触触发停止。
-- 更真实的路径规划和避障。
-- 真实扫描石头 mesh 与实机参数。
-
-## GitHub 注意事项
-
-仓库默认忽略：
+The repository ignores generated artifacts by default:
 
 ```text
 .venv/
@@ -244,4 +275,6 @@ outputs/
 *.pdf
 ```
 
-这样 GitHub 上主要保留源码、说明文档和少量关键展示图。运行脚本后可以在本地重新生成 `reports/` 和 `outputs/`。如果需要保存某个最终报告或 XML 到仓库，建议复制到 `docs/` 或 `examples/` 并注明生成命令，不建议把所有中间调参文件都提交。
+This keeps the Git history focused on source code and documentation. Run the
+scripts above to regenerate reports, MuJoCo XML scenes, rendered images, and
+videos locally.

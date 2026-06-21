@@ -10,3 +10,5 @@ outputs/
 *.mp4
 *.mjb
 *.pdf
+
+github_ssh_public_key.txt
