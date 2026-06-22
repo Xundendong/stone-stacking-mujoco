@@ -11,7 +11,7 @@ It is not a rendering-only animation: stone transport uses MuJoCo contact and
 friction at the gripper pads, and each placed stone is released and settled
 under gravity.
 
-![Final dry-stone wall executed with UR5e and Robotiq in MuJoCo](docs/assets/official_ur5e_wall_snapshot.png)
+![Final dry-stone wall executed with UR5e and Robotiq in MuJoCo](docs/assets/截图 2026-06-22 13-54-57.png)
 
 ## Scope
 
