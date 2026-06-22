@@ -21,6 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
+import trimesh
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -59,6 +60,8 @@ FINGER_CONTACT_GEOMS = (
     "left_fingertip_collision",
     "right_fingertip_collision",
 )
+DEFAULT_STONE_VISUAL_ROUGHNESS = 0.004
+DEFAULT_STONE_VISUAL_SUBDIVISIONS = 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -161,6 +164,18 @@ def parse_args() -> argparse.Namespace:
         choices=("clean", "robosuite"),
         default="clean",
         help="Robot visual style. clean hides robot collision geoms while preserving robosuite assembled visuals and dynamics.",
+    )
+    parser.add_argument(
+        "--stone-visual-roughness",
+        type=float,
+        default=DEFAULT_STONE_VISUAL_ROUGHNESS,
+        help="Visual-only stone surface relief amplitude in meters. Set 0 to show the raw collision mesh.",
+    )
+    parser.add_argument(
+        "--stone-visual-subdivisions",
+        type=int,
+        default=DEFAULT_STONE_VISUAL_SUBDIVISIONS,
+        help="Visual-only mesh subdivision rounds before applying surface relief.",
     )
     parser.add_argument(
         "--no-reset-supply-before-pick",
@@ -338,9 +353,103 @@ def stone_mesh_asset(stone: FlatStone) -> ET.Element:
     )
 
 
-def stone_body(stone: FlatStone, pos: np.ndarray, quat: np.ndarray) -> ET.Element:
+def stable_stone_seed(stone: FlatStone) -> int:
+    seed = 0
+    for index, char in enumerate(stone.name):
+        seed += (index + 1) * ord(char)
+    seed += int(round(stone.length * 100_000.0))
+    seed += int(round(stone.width * 1_000_000.0))
+    seed += int(round(stone.thickness * 10_000_000.0))
+    return seed % (2**32)
+
+
+def stone_visual_rgba(stone: FlatStone) -> tuple[float, float, float, float]:
+    rng = np.random.default_rng(stable_stone_seed(stone) + 19_381)
+    rgb = np.asarray(stone.rgba[:3], dtype=float)
+    rgb = rgb * float(rng.uniform(0.92, 1.06)) + rng.uniform(-0.018, 0.018, size=3)
+    return tuple(float(value) for value in np.clip(rgb, 0.18, 0.76)) + (1.0,)
+
+
+def stone_visual_material_asset(stone: FlatStone) -> ET.Element:
+    return ET.Element(
+        "material",
+        {
+            "name": f"{stone.name}_rough_mat",
+            "rgba": _fmt(stone_visual_rgba(stone)),
+            "specular": "0.05",
+            "shininess": "0.12",
+            "reflectance": "0.0",
+        },
+    )
+
+
+def stone_visual_mesh_asset(
+    stone: FlatStone,
+    roughness: float,
+    subdivisions: int,
+) -> ET.Element:
+    roughness = max(0.0, float(roughness))
+    subdivisions = max(0, int(subdivisions))
+    mesh = trimesh.Trimesh(
+        vertices=np.asarray(stone.vertices, dtype=float),
+        faces=np.asarray(stone.faces, dtype=int),
+        process=False,
+    )
+    for _ in range(subdivisions):
+        mesh = mesh.subdivide()
+    mesh.fix_normals()
+
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    normals = np.asarray(mesh.vertex_normals, dtype=float).copy()
+    normal_lengths = np.linalg.norm(normals, axis=1)
+    fallback = vertices / np.maximum(np.linalg.norm(vertices, axis=1, keepdims=True), 1.0e-9)
+    normals[normal_lengths < 1.0e-9] = fallback[normal_lengths < 1.0e-9]
+
+    rng = np.random.default_rng(stable_stone_seed(stone) + 47_911)
+    extents = np.maximum(np.ptp(vertices, axis=0), 1.0e-9)
+    mean_extent = max(float(np.mean(extents)), 1.0e-9)
+    directions = rng.normal(size=(5, 3))
+    directions = directions / np.maximum(np.linalg.norm(directions, axis=1, keepdims=True), 1.0e-9)
+    weights = np.array([0.62, 0.48, 0.36, 0.25, 0.18], dtype=float)
+    freqs = np.array([10.0, 15.0, 22.0, 31.0, 43.0], dtype=float)
+    phases = rng.uniform(0.0, 2.0 * math.pi, size=len(weights))
+    relief = np.zeros(len(vertices), dtype=float)
+    for direction, weight, freq, phase in zip(directions, weights, freqs, phases):
+        relief += weight * np.sin(freq * (vertices @ direction) / mean_extent + phase)
+    relief += rng.normal(0.0, 0.22, size=len(vertices))
+    relief -= float(np.mean(relief))
+    relief /= max(float(np.max(np.abs(relief))), 1.0e-9)
+
+    base_offset = max(0.00035, 0.62 * roughness)
+    displacement = np.clip(
+        base_offset + roughness * relief,
+        0.00025,
+        base_offset + 1.12 * roughness,
+    )
+    rough_vertices = vertices + normals * displacement[:, None]
+
+    return ET.Element(
+        "mesh",
+        {
+            "name": f"{stone.name}_rough_visual_mesh",
+            "vertex": flatten_vertices([tuple(map(float, vertex)) for vertex in rough_vertices]),
+            "face": flatten_faces([tuple(map(int, face)) for face in np.asarray(mesh.faces, dtype=int)]),
+            "smoothnormal": "false",
+        },
+    )
+
+
+def stone_body(
+    stone: FlatStone,
+    pos: np.ndarray,
+    quat: np.ndarray,
+    stone_visual_roughness: float = DEFAULT_STONE_VISUAL_ROUGHNESS,
+) -> ET.Element:
     body = ET.Element("body", {"name": stone.name, "pos": _fmt(pos), "quat": _fmt(quat)})
     ET.SubElement(body, "freejoint", {"name": f"{stone.name}_free"})
+    collision_rgba = stone.rgba
+    if stone_visual_roughness > 0.0:
+        collision_rgba = (stone.rgba[0], stone.rgba[1], stone.rgba[2], 0.0)
     ET.SubElement(
         body,
         "geom",
@@ -349,13 +458,28 @@ def stone_body(stone: FlatStone, pos: np.ndarray, quat: np.ndarray) -> ET.Elemen
             "type": "mesh",
             "mesh": f"{stone.name}_mesh",
             "mass": f"{stone.mass:.6g}",
-            "rgba": _fmt(stone.rgba),
+            "rgba": _fmt(collision_rgba),
             "friction": "1.15 0.030 0.002",
             "condim": "4",
             "solref": "0.005 1",
             "solimp": "0.92 0.99 0.001",
         },
     )
+    if stone_visual_roughness > 0.0:
+        ET.SubElement(
+            body,
+            "geom",
+            {
+                "name": f"{stone.name}_rough_visual_geom",
+                "type": "mesh",
+                "mesh": f"{stone.name}_rough_visual_mesh",
+                "material": f"{stone.name}_rough_mat",
+                "contype": "0",
+                "conaffinity": "0",
+                "density": "0",
+                "group": "2",
+            },
+        )
     return body
 
 
@@ -363,6 +487,8 @@ def build_wall_stack_scene(
     stones: list[FlatStone],
     initial_poses: dict[str, tuple[np.ndarray, np.ndarray]],
     robot_visual: str = "clean",
+    stone_visual_roughness: float = DEFAULT_STONE_VISUAL_ROUGHNESS,
+    stone_visual_subdivisions: int = DEFAULT_STONE_VISUAL_SUBDIVISIONS,
 ) -> str:
     _require_asset(UR5E_XML)
     _require_asset(ROBOTIQ_140_XML)
@@ -425,6 +551,9 @@ def build_wall_stack_scene(
             asset.append(deepcopy(child))
     for stone in stones:
         asset.append(stone_mesh_asset(stone))
+        if stone_visual_roughness > 0.0:
+            asset.append(stone_visual_material_asset(stone))
+            asset.append(stone_visual_mesh_asset(stone, stone_visual_roughness, stone_visual_subdivisions))
 
     worldbody = ET.SubElement(root, "worldbody")
     ET.SubElement(
@@ -467,7 +596,7 @@ def build_wall_stack_scene(
 
     for stone in stones:
         pos, quat = initial_poses[stone.name]
-        worldbody.append(stone_body(stone, pos, quat))
+        worldbody.append(stone_body(stone, pos, quat, stone_visual_roughness))
 
     actuator = ET.SubElement(root, "actuator")
     for joint_name in UR_JOINTS:
@@ -511,7 +640,13 @@ def prepare(args: argparse.Namespace):
         entry["name"]: initial_supply_pose(index, entry, by_name[entry["name"]])
         for index, entry in enumerate(entries)
     }
-    xml = build_wall_stack_scene(stones, initial_poses, robot_visual=args.robot_visual)
+    xml = build_wall_stack_scene(
+        stones,
+        initial_poses,
+        robot_visual=args.robot_visual,
+        stone_visual_roughness=args.stone_visual_roughness,
+        stone_visual_subdivisions=args.stone_visual_subdivisions,
+    )
     args.save_xml.parent.mkdir(parents=True, exist_ok=True)
     args.save_xml.write_text(xml, encoding="utf-8")
     model = mujoco.MjModel.from_xml_string(xml)
@@ -1054,6 +1189,11 @@ def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data
                 else "robosuite original robot visuals"
             ),
         },
+        "stone_visuals": {
+            "surface_roughness_m": float(args.stone_visual_roughness),
+            "surface_subdivisions": int(args.stone_visual_subdivisions),
+            "collision_note": "rough visual meshes are massless and collision-disabled; original convex meshes still provide contact, mass, and friction",
+        },
         "control": {
             "ur": "position targets from MuJoCo Jacobian IK, seeded on elbow-up branch",
             "gripper": "Robotiq joint position actuators; stones are not welded/attached",
@@ -1085,6 +1225,8 @@ def main() -> int:
                     "xml": str(args.save_xml),
                     "planner_report": str(args.report),
                     "planner_final_height_m": report.get("final_height_m"),
+                    "stone_visual_roughness_m": float(args.stone_visual_roughness),
+                    "stone_visual_subdivisions": int(args.stone_visual_subdivisions),
                 },
                 indent=2,
             )

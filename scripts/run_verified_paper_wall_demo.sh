@@ -19,6 +19,8 @@ exec python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --contact-aware-place \
   --settle-time 1.20 \
   --robot-visual clean \
+  --stone-visual-roughness 0.0045 \
+  --stone-visual-subdivisions 2 \
   --save-xml outputs/official_ur5e_robotiq_paper_light_4_3_2_1_10.xml \
   --output-json reports/official_ur5e_robotiq_paper_light_4_3_2_1_10.json \
   "$@"
