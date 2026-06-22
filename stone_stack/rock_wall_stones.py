@@ -173,7 +173,10 @@ def generate_natural_wall_rock(
     target_extents = np.array([length, width, thickness], dtype=float)
     mesh = trimesh.creation.box(extents=target_extents)
 
-    base_scale = target_extents * np.array([0.12, 0.13, 0.18]) * irregularity
+    # Keep the long/side faces visibly irregular, but avoid over-perturbing the
+    # bedding direction. Natural dry-wall stones are rough, not spherical; they
+    # still need broad-ish upper/lower faces to be stackable by contact.
+    base_scale = target_extents * np.array([0.12, 0.13, 0.095]) * irregularity
     vertices = mesh.vertices.copy()
     vertices = vertices + _truncated_normal_offsets(rng, len(vertices), base_scale)
     mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
@@ -192,7 +195,7 @@ def generate_natural_wall_rock(
             + 0.7 * np.cos(19.0 * vertices[:, 1] / max(width, 1.0e-9) + phase[1])
             + 0.5 * np.sin(23.0 * vertices[:, 2] / max(thickness, 1.0e-9) + phase[2])
         )
-        offsets += vertices * (0.018 * irregularity * relief[:, None] / (level + 1))
+        offsets += vertices * (0.010 * irregularity * relief[:, None] / (level + 1))
         vertices = vertices + offsets
         mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
 
@@ -229,11 +232,22 @@ def make_rock_wall_stones(
     count: int = 6,
     irregularity: float = 0.75,
     subdivisions: int = 5,
+    style: str = "paper",
 ) -> list[FlatStone]:
     """Create a deterministic set of From-Rocks-to-Walls-style stones."""
 
     if count <= 0:
         raise ValueError("count must be positive")
+    normalized_style = style.strip().lower().replace("_", "-")
+    if normalized_style in {"natural", "rough", "wall-rocks"}:
+        return make_natural_wall_rocks(
+            seed=seed,
+            count=count,
+            irregularity=irregularity,
+            subdivisions=subdivisions,
+        )
+    if normalized_style not in {"paper", "from-rocks-to-walls", "convex"}:
+        raise ValueError("style must be one of: paper, natural")
 
     stones: list[FlatStone] = []
     dim_rng = np.random.default_rng(seed * 6151 + 97)
@@ -265,7 +279,7 @@ def make_natural_wall_rocks(
     irregularity: float = 1.0,
     subdivisions: int = 5,
 ) -> list[FlatStone]:
-    """Create realistic, flat-ish rocks for a short dry-wall demo."""
+    """Create realistic, flat wall rocks for dry-stacking experiments."""
 
     if count <= 0:
         raise ValueError("count must be positive")
@@ -273,16 +287,17 @@ def make_natural_wall_rocks(
     rng = np.random.default_rng(seed * 7757 + 211)
     stones: list[FlatStone] = []
     for index in range(count):
-        length = float(rng.uniform(0.145, 0.225))
-        width = float(rng.uniform(0.085, 0.130))
-        thickness = float(rng.uniform(0.050, 0.083))
+        length = float(rng.uniform(0.150, 0.220))
+        width = float(rng.uniform(0.095, 0.138))
+        thickness = float(rng.uniform(0.062, 0.095))
         if index < 4:
             length *= 1.08
+            width *= 1.04
             thickness *= 1.05
         elif index >= 7:
             length *= 0.88
-            width *= 0.95
-            thickness *= 0.92
+            width *= 0.98
+            thickness *= 0.97
 
         stone_seed = seed * 150_001 + index * 12_989 + 53
         stones.append(

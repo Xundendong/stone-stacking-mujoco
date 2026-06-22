@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--wall-width", type=float, default=0.62)
     parser.add_argument("--wall-y", type=float, default=0.0)
+    parser.add_argument(
+        "--rock-style",
+        choices=("paper", "natural"),
+        default="paper",
+        help="paper keeps the original convex-hull baseline; natural uses stronger multi-scale surface relief.",
+    )
     parser.add_argument("--rock-irregularity", type=float, default=1.0)
     parser.add_argument("--rock-subdivisions", type=int, default=5)
     parser.add_argument(
@@ -483,6 +489,7 @@ def main() -> int:
         count=args.stones,
         irregularity=args.rock_irregularity,
         subdivisions=args.rock_subdivisions,
+        style=args.rock_style,
     )
     if args.max_grasp_mass > 0.0:
         planning_stones = [stone for stone in all_stones if stone.mass <= args.max_grasp_mass]
@@ -668,6 +675,7 @@ def main() -> int:
             "wall_width": args.wall_width,
             "rock_irregularity": args.rock_irregularity,
             "rock_subdivisions": args.rock_subdivisions,
+            "rock_style": args.rock_style,
             "samples_per_stone": args.samples_per_stone,
             "search_time": args.search_time,
             "settle_time": args.settle_time,

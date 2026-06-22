@@ -26,9 +26,10 @@ procedural irregular stone generation
 -> release, settling, and success evaluation
 ```
 
-The current default task builds a `3 + 2 + 1` dry-stone wall using six selected
-stones. A seventh generated stone is available to the planner but filtered out
-or left unused depending on the sequence result.
+The current verified demo builds a `4 + 3 + 2 + 1` dry-stone wall using ten
+selected stones from a larger generated candidate set. The smaller `3 + 2 + 1`
+configuration is still useful as a fast smoke test, but the main reported
+baseline is now the ten-stone, four-course execution.
 
 ## Research Basis
 
@@ -62,12 +63,18 @@ Implemented:
 - Procedural irregular stones using subdivision, truncated-normal vertex
   displacement, convex hull reconstruction, OBB alignment, and randomized
   density.
-- Stability-based course planning for a `3,2,1` wall.
+- Stability-based course planning for `3,2,1` smoke tests and `4,3,2,1`
+  four-course walls.
 - Truth-state object and target-pose search in MuJoCo.
 - Gravity, contact, friction, release, and settling simulation.
 - Articulated UR5e execution using MuJoCo Jacobian IK.
 - Robotiq 2F-140 contact grasping with actuated finger joints.
 - No weld or attach constraint between the gripper and stones during transport.
+- Vertical gripper retreat after release, so the gripper lifts away from the
+  placed stone instead of sliding horizontally through the wall.
+- Rear supply-pocket reset before each grasp, keeping unplaced stones away from
+  the wall during manipulation.
+- Grasp retry support for difficult stones.
 - Clean UR5e visualization that preserves robosuite assembled visual meshes and
   hides only robot collision geoms.
 
@@ -121,33 +128,49 @@ scripts/run_official_ur5e_robotiq_grasp_test.py
 
 ## Quick Start
 
-Generate a stability-based wall plan:
+Generate the verified ten-stone, four-course wall plan:
 
 ```bash
 cd /home/xunden/stone-stacking-mujoco
 source .venv/bin/activate
-python scripts/run_stability_sequence_planner.py
+python scripts/run_stability_sequence_planner.py \
+  --rock-style paper \
+  --stones 24 \
+  --courses 4,3,2,1 \
+  --samples-per-stone 16 \
+  --max-grasp-mass 2.80 \
+  --min-support-bodies 1 \
+  --output-json reports/stability_sequence_planner_4_3_2_1_paper_light_24_s16_m28.json \
+  --save-final-xml outputs/stability_sequence_planner_4_3_2_1_paper_light_24_s16_m28.xml
 ```
 
 This writes:
 
 ```text
-reports/stability_sequence_planner.json
-outputs/stability_sequence_planner_final.xml
+reports/stability_sequence_planner_4_3_2_1_paper_light_24_s16_m28.json
+outputs/stability_sequence_planner_4_3_2_1_paper_light_24_s16_m28.xml
 ```
 
 Run the UR5e + Robotiq execution demo:
 
 ```bash
 python scripts/run_official_ur5e_robotiq_wall_stack.py \
-  --report reports/stability_sequence_planner.json \
-  --max-placements 6 \
+  --report reports/stability_sequence_planner_4_3_2_1_paper_light_24_s16_m28.json \
+  --max-placements 10 \
+  --close 0.30 \
+  --grasp-retries 1 \
+  --grasp-retry-close-step 0.06 \
+  --upper-place-clearance 0.000 \
+  --upper-place-descent-time 1.50 \
+  --contact-aware-place \
+  --settle-time 1.20 \
   --robot-visual clean \
   --view
 ```
 
-The MuJoCo viewer will show the robot grasping, transporting, and placing six
-irregular stones into a `3 + 2 + 1` dry-stone wall.
+The MuJoCo viewer will show the robot grasping, transporting, releasing, and
+vertically retreating from ten irregular stones in a `4 + 3 + 2 + 1`
+dry-stone wall.
 
 ## Headless Verification
 
@@ -155,51 +178,88 @@ Run the same execution without opening the viewer:
 
 ```bash
 python scripts/run_official_ur5e_robotiq_wall_stack.py \
-  --report reports/stability_sequence_planner.json \
-  --max-placements 6 \
+  --report reports/stability_sequence_planner_4_3_2_1_paper_light_24_s16_m28.json \
+  --max-placements 10 \
+  --close 0.30 \
+  --grasp-retries 1 \
+  --grasp-retry-close-step 0.06 \
+  --upper-place-clearance 0.000 \
+  --upper-place-descent-time 1.50 \
+  --contact-aware-place \
+  --settle-time 1.20 \
   --robot-visual clean \
-  --save-xml outputs/official_ur5e_robotiq_default_safe_queue_6.xml \
-  --output-json reports/official_ur5e_robotiq_default_safe_queue_6.json
+  --save-xml outputs/official_ur5e_robotiq_paper_light_4_3_2_1_10.xml \
+  --output-json reports/official_ur5e_robotiq_paper_light_4_3_2_1_10.json
 ```
 
 Verified result on the current development setup:
 
 ```text
 success: true
-placed_count: 6
-stacked_count: 6
-final_center_height_m: 0.18965227759944397
+requested_placements: 10
+placed_count: 10
+stacked_count: 9
+final_center_height_m: 0.23883726347722897
 ```
 
 The corresponding placement trace is:
 
 ```text
-placement=1 stone=rock_wall_06 course=0 lifted=0.092 placed=True
-placement=2 stone=rock_wall_04 course=0 lifted=0.102 placed=True
-placement=3 stone=rock_wall_07 course=0 lifted=0.069 placed=True
-placement=4 stone=rock_wall_03 course=1 lifted=0.112 placed=True
-placement=5 stone=rock_wall_02 course=1 lifted=0.127 placed=True
-placement=6 stone=rock_wall_01 course=2 lifted=0.114 placed=True
+placement=1 stone=rock_wall_20 course=0 lifted=0.131 placed=True
+placement=2 stone=rock_wall_24 course=0 lifted=0.111 placed=True
+placement=3 stone=rock_wall_22 course=0 lifted=0.105 placed=True
+placement=4 stone=rock_wall_07 course=0 lifted=0.082 placed=True
+placement=5 stone=rock_wall_06 course=1 lifted=0.127 placed=True
+placement=6 stone=rock_wall_09 course=1 lifted=0.099 placed=True
+placement=7 stone=rock_wall_14 course=1 lifted=0.079 placed=True
+placement=8 stone=rock_wall_02 course=2 lifted=0.129 placed=True
+placement=9 stone=rock_wall_01 course=2 lifted=0.104 placed=True
+placement=10 stone=rock_wall_21 course=3 lifted=0.121 placed=True
 ```
 
 ## Important Execution Parameters
 
-The current stable defaults are:
+The verified ten-stone execution uses:
 
 ```text
-Robotiq close command: 0.32 rad
+Robotiq close command: 0.30 rad
+grasp retries: 1
+grasp retry close step: 0.06 rad
 bottom-course place clearance: 0.010 m
-upper-course place clearance: -0.045 m
-settle time after release: 0.80 s
+upper-course place clearance: 0.000 m
+upper-course descent time: 1.50 s
+settle time after release: 1.20 s
+retreat after release: vertical lift
 ```
 
-These defaults were tuned to reduce two common failure modes:
+These parameters were tuned to reduce three common failure modes:
 
 - excessive lateral squeezing of sloped irregular stones by the gripper;
-- top-course stones settling too low after release.
+- top-course stones settling too low after release;
+- the gripper brushing the wall during post-release retreat.
 
 If these parameters are changed, rerun the headless verification before using
 the result as a baseline.
+
+## Stone Geometry
+
+The verified demo uses the `paper` rock style from
+`stone_stack/rock_wall_stones.py`. This is not a box primitive: each stone is
+generated from a rectangular prism by subdivision, truncated-normal vertex
+displacement, convex hull reconstruction, and oriented-bounding-box alignment.
+The resulting faceted surface participates in MuJoCo contact, so the visible
+roughness is also collision geometry.
+
+The `natural` style is also available:
+
+```bash
+python scripts/run_stability_sequence_planner.py --rock-style natural
+```
+
+It produces stronger visual roughness and less planar bedding surfaces. That is
+useful for stress-testing planning, but the current robust robot-execution
+baseline uses the `paper` style because its rough convex stones remain
+stackable under gripper release.
 
 ## Rendering the Result
 
@@ -207,9 +267,12 @@ Generate the README snapshot from the final execution report:
 
 ```bash
 python scripts/render_wall_stack_snapshot.py \
-  --xml outputs/official_ur5e_robotiq_default_safe_queue_6.xml \
-  --report reports/official_ur5e_robotiq_default_safe_queue_6.json \
-  --output docs/assets/official_ur5e_wall_snapshot.png
+  --xml outputs/official_ur5e_robotiq_paper_light_4_3_2_1_10.xml \
+  --report reports/official_ur5e_robotiq_paper_light_4_3_2_1_10.json \
+  --output docs/assets/official_ur5e_wall_snapshot.png \
+  --distance 1.12 \
+  --azimuth 118 \
+  --elevation -24
 ```
 
 The execution XML contains the initial simulation scene, while the final stone

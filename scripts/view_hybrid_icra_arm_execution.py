@@ -266,6 +266,7 @@ def report_stones(report: dict) -> list[FlatStone]:
         count=int(params["stones"]),
         irregularity=float(params["rock_irregularity"]),
         subdivisions=int(params["rock_subdivisions"]),
+        style=str(params.get("rock_style", "paper")),
     )
 
 

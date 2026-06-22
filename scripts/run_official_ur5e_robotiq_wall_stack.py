@@ -76,6 +76,24 @@ def parse_args() -> argparse.Namespace:
         default=0.32,
         help="Robotiq close command in radians. Lower values reduce sideways squeezing on irregular stones.",
     )
+    parser.add_argument(
+        "--grasp-retries",
+        type=int,
+        default=1,
+        help="Retry a placement this many times with stronger gripper closure when the stone was not lifted.",
+    )
+    parser.add_argument(
+        "--grasp-retry-close-step",
+        type=float,
+        default=0.06,
+        help="Additional close command applied on each grasp retry.",
+    )
+    parser.add_argument(
+        "--grasp-retry-yaw-step",
+        type=float,
+        default=math.pi / 2.0,
+        help="Additional gripper yaw offset applied on each grasp retry.",
+    )
     parser.add_argument("--lift-height", type=float, default=0.20)
     parser.add_argument("--approach-height", type=float, default=0.20)
     parser.add_argument(
@@ -114,6 +132,12 @@ def parse_args() -> argparse.Namespace:
         default=0.040,
         help="Seconds of sustained support contact required before contact-aware placement stops descending.",
     )
+    parser.add_argument(
+        "--place-contact-min-contacts",
+        type=int,
+        default=2,
+        help="Minimum simultaneous support contacts required before contact-aware placement stops descending.",
+    )
     parser.add_argument("--settle-time", type=float, default=0.80)
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument(
@@ -126,6 +150,30 @@ def parse_args() -> argparse.Namespace:
         "--no-reset-supply-before-pick",
         action="store_true",
         help="Do not move the next unplaced stone back to its feed pose before grasping.",
+    )
+    parser.add_argument(
+        "--online-support-correction",
+        action="store_true",
+        default=False,
+        help="Enable experimental XY target correction from measured lower-course support drift.",
+    )
+    parser.add_argument(
+        "--no-online-support-correction",
+        dest="online_support_correction",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--support-correction-gain",
+        type=float,
+        default=0.85,
+        help="Gain for online XY target correction from lower-course support drift.",
+    )
+    parser.add_argument(
+        "--max-support-correction",
+        type=float,
+        default=0.080,
+        help="Clamp online XY support correction to this norm in meters.",
     )
     parser.add_argument("--view", action="store_true")
     parser.add_argument("--check-only", action="store_true")
@@ -158,6 +206,7 @@ def report_stones(report: dict) -> list[FlatStone]:
         count=int(params["stones"]),
         irregularity=float(params["rock_irregularity"]),
         subdivisions=int(params["rock_subdivisions"]),
+        style=str(params.get("rock_style", "paper")),
     )
 
 
@@ -186,9 +235,11 @@ def selected_wall_entries(report: dict, args: argparse.Namespace) -> list[dict]:
 
 def supply_pose(index: int, entry: dict, stone: FlatStone) -> tuple[np.ndarray, np.ndarray]:
     # Keep the supply area reachable and space stones far enough that they do
-    # not knock each other while settling.
+    # not knock each other while settling. Reuse the rear feed pockets for
+    # upper-course stones too; resetting them near the wall makes later grasps
+    # interfere with already placed stones.
     if int(entry["course"]) > 0:
-        upper_positions = [(0.18, 0.18), (-0.18, 0.18), (0.18, 0.30), (-0.18, 0.30)]
+        upper_positions = [(-0.36, 0.36), (0.00, 0.36), (0.30, 0.30), (-0.16, 0.48)]
         x, y = upper_positions[int(entry["slot_index"]) % len(upper_positions)]
     else:
         bottom_positions = [(-0.36, 0.36), (0.00, 0.36), (0.30, 0.30), (-0.16, 0.48)]
@@ -214,6 +265,10 @@ def initial_supply_pose(index: int, entry: dict, stone: FlatStone) -> tuple[np.n
         (0.54, 0.56),
         (-0.36, 0.18),
         (0.44, 0.34),
+        (-0.42, 0.54),
+        (0.18, 0.54),
+        (0.54, 0.38),
+        (-0.54, 0.34),
     ]
     x, y = positions[index % len(positions)]
     vertices = np.asarray(stone.vertices, dtype=float)
@@ -487,7 +542,7 @@ def drive_place_descent(
             include_table=False,
         )
         max_contacts = max(max_contacts, contacts)
-        if contacts > 0:
+        if contacts >= args.place_contact_min_contacts:
             contact_hold += 1
             if contact_hold >= hold_steps:
                 if viewer is not None:
@@ -514,6 +569,50 @@ def reset_stone_to_supply(mujoco, model, data, entry: dict, stone: FlatStone, se
     mujoco.mj_forward(model, data)
     step_seconds(mujoco, model, data, seconds)
     return body_pose(model, data, stone.name)[0]
+
+
+def corrected_entry_from_supports(
+    args: argparse.Namespace,
+    entry: dict,
+    planned_by_slot: dict[tuple[int, int], dict],
+    actual_by_slot: dict[tuple[int, int], np.ndarray],
+) -> dict:
+    adjusted = dict(entry)
+    nominal_pos = np.asarray(entry["pos"], dtype=float)
+    adjusted["nominal_pos"] = nominal_pos.copy()
+    adjusted["target_correction"] = np.zeros(3, dtype=float)
+    if not args.online_support_correction:
+        return adjusted
+
+    course = int(entry["course"])
+    slot = int(entry["slot_index"])
+    if course <= 0:
+        return adjusted
+
+    support_deltas: list[np.ndarray] = []
+    for lower_slot in (slot, slot + 1):
+        planned = planned_by_slot.get((course - 1, lower_slot))
+        actual = actual_by_slot.get((course - 1, lower_slot))
+        if planned is None or actual is None:
+            continue
+        planned_pos = np.asarray(planned["pos"], dtype=float)
+        support_deltas.append(np.asarray(actual, dtype=float)[:2] - planned_pos[:2])
+    if not support_deltas:
+        return adjusted
+
+    correction_xy = float(args.support_correction_gain) * np.mean(np.vstack(support_deltas), axis=0)
+    norm = float(np.linalg.norm(correction_xy))
+    max_norm = max(0.0, float(args.max_support_correction))
+    if max_norm > 0.0 and norm > max_norm:
+        correction_xy = correction_xy * (max_norm / max(norm, 1.0e-9))
+
+    corrected_pos = nominal_pos.copy()
+    corrected_pos[:2] += correction_xy
+    correction = np.zeros(3, dtype=float)
+    correction[:2] = correction_xy
+    adjusted["pos"] = corrected_pos.tolist()
+    adjusted["target_correction"] = correction
+    return adjusted
 
 
 def settle_initial_scene(mujoco, model, data, q: np.ndarray, seconds: float, viewer, speed: float) -> None:
@@ -619,10 +718,10 @@ def execute_entry(
         else args.upper_place_descent_time
     )
     target_yaw = yaw_from_quat(target_quat)
-    grasp_yaw = target_yaw + math.pi / 2.0
+    grasp_yaw = target_yaw + math.pi / 2.0 + float(entry.get("grasp_yaw_offset", 0.0))
     target_rot = top_down_gripper_rotation(grasp_yaw)
     open_ctrl = (0.0, 0.0)
-    close_value = float(np.clip(args.close, 0.0, 0.7))
+    close_value = float(np.clip(entry.get("close_override", args.close), 0.0, 0.7))
     close_ctrl = (close_value, -close_value)
     set_gripper_contact(model, True)
     set_stone_contact(model, stone.name, True)
@@ -719,25 +818,24 @@ def execute_entry(
     q = drive_segment(
         mujoco, model, data, ik_data, release_site, release_site, q, target_rot, open_ctrl, 0.85, viewer, args.speed
     )
+    set_gripper_contact(model, False)
     step_seconds(mujoco, model, data, args.settle_time, viewer, args.speed)
     settled_pos, settled_quat = body_pose(model, data, stone.name)
-    set_gripper_contact(model, False)
 
-    slide_direction = target_rot[:, 1].copy()
-    slide_direction[2] = 0.0
-    slide_norm = float(np.linalg.norm(slide_direction))
-    if slide_norm < 1.0e-9:
-        slide_direction = np.array([1.0, 0.0, 0.0], dtype=float)
-    else:
-        slide_direction = slide_direction / slide_norm
-    slide_site = release_site + 0.14 * slide_direction
-    above_slide = slide_site + np.array([0.0, 0.0, args.approach_height])
-
+    retreat_site = release_site + np.array([0.0, 0.0, args.approach_height], dtype=float)
     q = drive_segment(
-        mujoco, model, data, ik_data, release_site, slide_site, q, target_rot, open_ctrl, 0.55, viewer, args.speed
-    )
-    q = drive_segment(
-        mujoco, model, data, ik_data, slide_site, above_slide, q, target_rot, open_ctrl, 0.55, viewer, args.speed
+        mujoco,
+        model,
+        data,
+        ik_data,
+        release_site,
+        retreat_site,
+        q,
+        target_rot,
+        open_ctrl,
+        0.70,
+        viewer,
+        args.speed,
     )
     step_seconds(mujoco, model, data, 0.15, viewer, args.speed)
     final_pos, final_quat = body_pose(model, data, stone.name)
@@ -755,11 +853,20 @@ def execute_entry(
         "name": stone.name,
         "course": int(entry["course"]),
         "slot_index": int(entry["slot_index"]),
+        "nominal_target_pos": np.asarray(entry.get("nominal_pos", target_pos), dtype=float).tolist(),
+        "target_correction_m": np.asarray(
+            entry.get("target_correction", np.zeros(3, dtype=float)),
+            dtype=float,
+        ).tolist(),
         "target_pos": target_pos.tolist(),
         "target_quat": target_quat.tolist(),
+        "grasp_yaw_offset_rad": float(entry.get("grasp_yaw_offset", 0.0)),
         "place_clearance_m": float(place_clearance),
         "place_descent_time_s": float(place_descent_time),
+        "close_command": [close_ctrl[0], close_ctrl[1]],
         "release_site": release_site.tolist(),
+        "retreat_mode": "vertical",
+        "retreat_site": retreat_site.tolist(),
         "contact_aware_place": bool(args.contact_aware_place and course > 0 and placed_names),
         "contact_place_stopped": contact_place_stopped,
         "place_support_contact_count": int(place_support_contact_count),
@@ -788,11 +895,47 @@ def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data
 
     step_results: list[dict] = []
     placed_names: list[str] = []
+    planned_by_slot = {
+        (int(entry["course"]), int(entry["slot_index"])): entry
+        for entry in entries
+    }
+    actual_by_slot: dict[tuple[int, int], np.ndarray] = {}
     for index, (entry, stone) in enumerate(zip(entries, stones), start=1):
-        q, result = execute_entry(args, mujoco, model, data, ik_data, entry, stone, placed_names, q, viewer)
+        execution_entry = corrected_entry_from_supports(args, entry, planned_by_slot, actual_by_slot)
+        attempts: list[dict] = []
+        max_attempts = 1 + max(0, int(args.grasp_retries))
+        for attempt in range(max_attempts):
+            attempt_entry = dict(execution_entry)
+            attempt_entry["close_override"] = float(args.close) + attempt * float(args.grasp_retry_close_step)
+            attempt_entry["grasp_yaw_offset"] = attempt * float(args.grasp_retry_yaw_step)
+            q, result = execute_entry(
+                args,
+                mujoco,
+                model,
+                data,
+                ik_data,
+                attempt_entry,
+                stone,
+                placed_names,
+                q,
+                viewer,
+            )
+            result["attempt"] = attempt + 1
+            attempts.append(result)
+            if result["lift_gain_m"] >= 0.045 or result["placed"]:
+                break
+            if viewer is not None and not viewer.is_running():
+                break
+        result = attempts[-1]
+        if len(attempts) > 1:
+            result["previous_attempts"] = attempts[:-1]
         step_results.append(result)
         if result["placed"]:
             placed_names.append(stone.name)
+            actual_by_slot[(int(result["course"]), int(result["slot_index"]))] = np.asarray(
+                result["final_pos"],
+                dtype=float,
+            )
         print(
             "placement={idx} stone={name} course={course} lifted={lift:.3f} "
             "xy_error={xy:.3f} z_error={z:.3f} placed={placed}".format(
@@ -835,7 +978,7 @@ def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data
             "ur": "position targets from MuJoCo Jacobian IK, seeded on elbow-up branch",
             "gripper": "Robotiq joint position actuators; stones are not welded/attached",
             "close_command": [float(np.clip(args.close, 0.0, 0.7)), -float(np.clip(args.close, 0.0, 0.7))],
-            "retreat_collision_filter": "fingerpad/tip collision is disabled only after release settling, then re-enabled before the next grasp",
+            "retreat_collision_filter": "fingerpad/tip collision is disabled after opening at release, the stone settles independently, and contact is re-enabled before the next grasp",
         },
         "steps": step_results,
         "xml": str(args.save_xml),
