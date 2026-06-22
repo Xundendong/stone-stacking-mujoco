@@ -63,10 +63,10 @@ Implemented:
 - Procedural irregular stones using subdivision, truncated-normal vertex
   displacement, convex hull reconstruction, OBB alignment, and randomized
   density.
-- Visual-only stone surface relief for the verified execution demo. The
+- Paper-style visual stone meshes for the verified execution demo. The
   original convex meshes still provide contact, mass, friction, and stability;
-  the outer rough meshes make the stones look less like smooth blocks in the
-  MuJoCo viewer.
+  the outer visual meshes use smooth normals and colored material styling so
+  the viewer resembles the reference paper figures.
 - Stability-based course planning for `3,2,1` smoke tests and `4,3,2,1`
   four-course walls.
 - Truth-state object and target-pose search in MuJoCo.
@@ -185,7 +185,8 @@ python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --contact-aware-place \
   --settle-time 1.20 \
   --robot-visual clean \
-  --stone-visual-roughness 0.0045 \
+  --stone-visual-style paper \
+  --stone-visual-roughness 0.0025 \
   --stone-visual-subdivisions 2 \
   --view
 ```
@@ -194,10 +195,12 @@ The MuJoCo viewer will show the robot grasping, transporting, releasing, and
 vertically retreating from ten irregular stones in a `4 + 3 + 2 + 1`
 dry-stone wall.
 
-The two `--stone-visual-*` parameters only change the rendered stone surface.
-They do not change the collision mesh used for grasping and stacking. Increase
-`--stone-visual-roughness` slightly, for example to `0.006`, if you want a more
-aggressive visual surface relief for screenshots.
+The `--stone-visual-*` parameters only change rendering. They do not change the
+collision mesh used for grasping and stacking. The default `paper` visual style
+uses smooth normals and saturated per-stone colors, matching the reference
+figures more closely than a noisy gray rock material. Use
+`--stone-visual-style natural --stone-visual-roughness 0.006` if you want a
+rougher gray stone look for screenshots.
 
 ## Headless Verification
 
@@ -215,7 +218,8 @@ python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --contact-aware-place \
   --settle-time 1.20 \
   --robot-visual clean \
-  --stone-visual-roughness 0.0045 \
+  --stone-visual-style paper \
+  --stone-visual-roughness 0.0025 \
   --stone-visual-subdivisions 2 \
   --save-xml outputs/official_ur5e_robotiq_paper_light_4_3_2_1_10.xml \
   --output-json reports/official_ur5e_robotiq_paper_light_4_3_2_1_10.json
@@ -343,8 +347,9 @@ The verified demo uses the `paper` rock style from
 generated from a rectangular prism by subdivision, truncated-normal vertex
 displacement, convex hull reconstruction, and oriented-bounding-box alignment.
 The resulting convex surface participates in MuJoCo contact. For the verified
-viewer demo, an additional massless, collision-disabled visual mesh adds
-millimeter-scale surface relief so the stones read as rough natural rocks
+viewer demo, an additional massless, collision-disabled visual mesh provides
+the paper-style appearance: smooth shading, colored stone materials, and only
+light millimeter-scale relief. This changes how the stones look in the viewer
 without changing the already validated grasping and stacking dynamics.
 
 The `natural` style is also available:

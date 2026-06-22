@@ -60,8 +60,19 @@ FINGER_CONTACT_GEOMS = (
     "left_fingertip_collision",
     "right_fingertip_collision",
 )
-DEFAULT_STONE_VISUAL_ROUGHNESS = 0.004
+DEFAULT_STONE_VISUAL_ROUGHNESS = 0.0025
 DEFAULT_STONE_VISUAL_SUBDIVISIONS = 2
+DEFAULT_STONE_VISUAL_STYLE = "paper"
+PAPER_STONE_PALETTE = (
+    (0.92, 0.78, 0.18),
+    (0.48, 0.34, 0.58),
+    (0.58, 0.61, 0.33),
+    (0.70, 0.58, 0.34),
+    (0.38, 0.48, 0.60),
+    (0.68, 0.42, 0.34),
+    (0.55, 0.52, 0.43),
+    (0.82, 0.70, 0.30),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -176,6 +187,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_STONE_VISUAL_SUBDIVISIONS,
         help="Visual-only mesh subdivision rounds before applying surface relief.",
+    )
+    parser.add_argument(
+        "--stone-visual-style",
+        choices=("paper", "natural"),
+        default=DEFAULT_STONE_VISUAL_STYLE,
+        help="Visual-only stone material style. paper matches the smooth colored stones used in the reference figures.",
     )
     parser.add_argument(
         "--no-reset-supply-before-pick",
@@ -363,21 +380,33 @@ def stable_stone_seed(stone: FlatStone) -> int:
     return seed % (2**32)
 
 
-def stone_visual_rgba(stone: FlatStone) -> tuple[float, float, float, float]:
+def stone_visual_rgba(stone: FlatStone, visual_style: str) -> tuple[float, float, float, float]:
     rng = np.random.default_rng(stable_stone_seed(stone) + 19_381)
+    if visual_style == "paper":
+        palette_index = stable_stone_seed(stone) % len(PAPER_STONE_PALETTE)
+        rgb = np.asarray(PAPER_STONE_PALETTE[palette_index], dtype=float)
+        rgb = rgb * float(rng.uniform(0.94, 1.06)) + rng.uniform(-0.025, 0.025, size=3)
+        return tuple(float(value) for value in np.clip(rgb, 0.18, 0.95)) + (1.0,)
+
     rgb = np.asarray(stone.rgba[:3], dtype=float)
     rgb = rgb * float(rng.uniform(0.92, 1.06)) + rng.uniform(-0.018, 0.018, size=3)
     return tuple(float(value) for value in np.clip(rgb, 0.18, 0.76)) + (1.0,)
 
 
-def stone_visual_material_asset(stone: FlatStone) -> ET.Element:
+def stone_visual_material_asset(stone: FlatStone, visual_style: str) -> ET.Element:
+    if visual_style == "paper":
+        specular = "0.14"
+        shininess = "0.22"
+    else:
+        specular = "0.05"
+        shininess = "0.12"
     return ET.Element(
         "material",
         {
             "name": f"{stone.name}_rough_mat",
-            "rgba": _fmt(stone_visual_rgba(stone)),
-            "specular": "0.05",
-            "shininess": "0.12",
+            "rgba": _fmt(stone_visual_rgba(stone, visual_style)),
+            "specular": specular,
+            "shininess": shininess,
             "reflectance": "0.0",
         },
     )
@@ -387,16 +416,35 @@ def stone_visual_mesh_asset(
     stone: FlatStone,
     roughness: float,
     subdivisions: int,
+    visual_style: str,
 ) -> ET.Element:
     roughness = max(0.0, float(roughness))
     subdivisions = max(0, int(subdivisions))
+    effective_roughness = roughness
+    if visual_style == "paper":
+        # The paper/reference figures use smooth-shaded colored stones rather
+        # than noisy surface relief. Keep only a light rounded shell.
+        effective_roughness = 0.45 * roughness
     mesh = trimesh.Trimesh(
         vertices=np.asarray(stone.vertices, dtype=float),
         faces=np.asarray(stone.faces, dtype=int),
         process=False,
     )
+    source_extents = np.maximum(np.ptp(mesh.vertices, axis=0), 1.0e-9)
     for _ in range(subdivisions):
         mesh = mesh.subdivide()
+    if visual_style == "paper":
+        trimesh.smoothing.filter_laplacian(
+            mesh,
+            lamb=0.36,
+            iterations=7,
+            volume_constraint=False,
+        )
+        vertices = np.asarray(mesh.vertices, dtype=float)
+        center = 0.5 * (vertices.min(axis=0) + vertices.max(axis=0))
+        smoothed_extents = np.maximum(np.ptp(vertices, axis=0), 1.0e-9)
+        scale = (source_extents * 1.012) / smoothed_extents
+        mesh.vertices = center + (vertices - center) * scale
     mesh.fix_normals()
 
     vertices = np.asarray(mesh.vertices, dtype=float)
@@ -410,21 +458,27 @@ def stone_visual_mesh_asset(
     mean_extent = max(float(np.mean(extents)), 1.0e-9)
     directions = rng.normal(size=(5, 3))
     directions = directions / np.maximum(np.linalg.norm(directions, axis=1, keepdims=True), 1.0e-9)
-    weights = np.array([0.62, 0.48, 0.36, 0.25, 0.18], dtype=float)
-    freqs = np.array([10.0, 15.0, 22.0, 31.0, 43.0], dtype=float)
+    if visual_style == "paper":
+        weights = np.array([0.55, 0.34, 0.18, 0.0, 0.0], dtype=float)
+        freqs = np.array([6.0, 9.0, 13.0, 1.0, 1.0], dtype=float)
+        noise_scale = 0.04
+    else:
+        weights = np.array([0.62, 0.48, 0.36, 0.25, 0.18], dtype=float)
+        freqs = np.array([10.0, 15.0, 22.0, 31.0, 43.0], dtype=float)
+        noise_scale = 0.22
     phases = rng.uniform(0.0, 2.0 * math.pi, size=len(weights))
     relief = np.zeros(len(vertices), dtype=float)
     for direction, weight, freq, phase in zip(directions, weights, freqs, phases):
         relief += weight * np.sin(freq * (vertices @ direction) / mean_extent + phase)
-    relief += rng.normal(0.0, 0.22, size=len(vertices))
+    relief += rng.normal(0.0, noise_scale, size=len(vertices))
     relief -= float(np.mean(relief))
     relief /= max(float(np.max(np.abs(relief))), 1.0e-9)
 
-    base_offset = max(0.00035, 0.62 * roughness)
+    base_offset = max(0.00035, 0.62 * effective_roughness)
     displacement = np.clip(
-        base_offset + roughness * relief,
+        base_offset + effective_roughness * relief,
         0.00025,
-        base_offset + 1.12 * roughness,
+        base_offset + 1.12 * effective_roughness,
     )
     rough_vertices = vertices + normals * displacement[:, None]
 
@@ -434,7 +488,7 @@ def stone_visual_mesh_asset(
             "name": f"{stone.name}_rough_visual_mesh",
             "vertex": flatten_vertices([tuple(map(float, vertex)) for vertex in rough_vertices]),
             "face": flatten_faces([tuple(map(int, face)) for face in np.asarray(mesh.faces, dtype=int)]),
-            "smoothnormal": "false",
+            "smoothnormal": "true",
         },
     )
 
@@ -489,6 +543,7 @@ def build_wall_stack_scene(
     robot_visual: str = "clean",
     stone_visual_roughness: float = DEFAULT_STONE_VISUAL_ROUGHNESS,
     stone_visual_subdivisions: int = DEFAULT_STONE_VISUAL_SUBDIVISIONS,
+    stone_visual_style: str = DEFAULT_STONE_VISUAL_STYLE,
 ) -> str:
     _require_asset(UR5E_XML)
     _require_asset(ROBOTIQ_140_XML)
@@ -552,8 +607,15 @@ def build_wall_stack_scene(
     for stone in stones:
         asset.append(stone_mesh_asset(stone))
         if stone_visual_roughness > 0.0:
-            asset.append(stone_visual_material_asset(stone))
-            asset.append(stone_visual_mesh_asset(stone, stone_visual_roughness, stone_visual_subdivisions))
+            asset.append(stone_visual_material_asset(stone, stone_visual_style))
+            asset.append(
+                stone_visual_mesh_asset(
+                    stone,
+                    stone_visual_roughness,
+                    stone_visual_subdivisions,
+                    stone_visual_style,
+                )
+            )
 
     worldbody = ET.SubElement(root, "worldbody")
     ET.SubElement(
@@ -646,6 +708,7 @@ def prepare(args: argparse.Namespace):
         robot_visual=args.robot_visual,
         stone_visual_roughness=args.stone_visual_roughness,
         stone_visual_subdivisions=args.stone_visual_subdivisions,
+        stone_visual_style=args.stone_visual_style,
     )
     args.save_xml.parent.mkdir(parents=True, exist_ok=True)
     args.save_xml.write_text(xml, encoding="utf-8")
@@ -1190,6 +1253,7 @@ def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data
             ),
         },
         "stone_visuals": {
+            "style": args.stone_visual_style,
             "surface_roughness_m": float(args.stone_visual_roughness),
             "surface_subdivisions": int(args.stone_visual_subdivisions),
             "collision_note": "rough visual meshes are massless and collision-disabled; original convex meshes still provide contact, mass, and friction",
@@ -1225,6 +1289,7 @@ def main() -> int:
                     "xml": str(args.save_xml),
                     "planner_report": str(args.report),
                     "planner_final_height_m": report.get("final_height_m"),
+                    "stone_visual_style": args.stone_visual_style,
                     "stone_visual_roughness_m": float(args.stone_visual_roughness),
                     "stone_visual_subdivisions": int(args.stone_visual_subdivisions),
                 },
