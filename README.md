@@ -134,6 +134,16 @@ scripts/run_official_ur5e_robotiq_grasp_test.py
 
 ## Quick Start
 
+The shortest way to open the verified ten-stone demo is:
+
+```bash
+cd /home/xunden/stone-stacking-mujoco
+./scripts/run_verified_paper_wall_demo.sh --view
+```
+
+This wrapper exists to avoid shell line-continuation mistakes in the long
+command below.
+
 Generate the verified ten-stone, four-course wall plan:
 
 ```bash
