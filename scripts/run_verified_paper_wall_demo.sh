@@ -22,6 +22,8 @@ exec python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --stone-visual-style paper \
   --stone-visual-roughness 0.0025 \
   --stone-visual-subdivisions 2 \
+  --stone-grain-strength 0.38 \
+  --stone-grain-particles 140 \
   --save-xml outputs/official_ur5e_robotiq_paper_light_4_3_2_1_10.xml \
   --output-json reports/official_ur5e_robotiq_paper_light_4_3_2_1_10.json \
   "$@"

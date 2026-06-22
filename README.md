@@ -65,8 +65,9 @@ Implemented:
   density.
 - Paper-style visual stone meshes for the verified execution demo. The
   original convex meshes still provide contact, mass, friction, and stability;
-  the outer visual meshes use smooth normals and colored material styling so
-  the viewer resembles the reference paper figures.
+  the outer visual meshes use smooth normals, colored material styling, and a
+  deterministic visual grain layer so the viewer shows fine stone-like surface
+  granularity.
 - Stability-based course planning for `3,2,1` smoke tests and `4,3,2,1`
   four-course walls.
 - Truth-state object and target-pose search in MuJoCo.
@@ -188,6 +189,8 @@ python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --stone-visual-style paper \
   --stone-visual-roughness 0.0025 \
   --stone-visual-subdivisions 2 \
+  --stone-grain-strength 0.38 \
+  --stone-grain-particles 140 \
   --view
 ```
 
@@ -198,9 +201,13 @@ dry-stone wall.
 The `--stone-visual-*` parameters only change rendering. They do not change the
 collision mesh used for grasping and stacking. The default `paper` visual style
 uses smooth normals and saturated per-stone colors, matching the reference
-figures more closely than a noisy gray rock material. Use
-`--stone-visual-style natural --stone-visual-roughness 0.006` if you want a
-rougher gray stone look for screenshots.
+figures more closely than a noisy gray rock material. The `--stone-grain-*`
+parameters add small visual-only dark and light speckles on the stone surface
+to express granular roughness. Use `--stone-grain-strength 0.55` and
+`--stone-grain-particles 200` for stronger visual grain, or
+`--stone-grain-particles 0` for smooth color-only stones. The separate
+`--stone-grain-texture` flag enables an experimental 2D texture path, but it is
+not the default because simple mesh UVs can stretch on side faces.
 
 ## Headless Verification
 
@@ -221,6 +228,8 @@ python scripts/run_official_ur5e_robotiq_wall_stack.py \
   --stone-visual-style paper \
   --stone-visual-roughness 0.0025 \
   --stone-visual-subdivisions 2 \
+  --stone-grain-strength 0.38 \
+  --stone-grain-particles 140 \
   --save-xml outputs/official_ur5e_robotiq_paper_light_4_3_2_1_10.xml \
   --output-json reports/official_ur5e_robotiq_paper_light_4_3_2_1_10.json
 ```
@@ -348,9 +357,10 @@ generated from a rectangular prism by subdivision, truncated-normal vertex
 displacement, convex hull reconstruction, and oriented-bounding-box alignment.
 The resulting convex surface participates in MuJoCo contact. For the verified
 viewer demo, an additional massless, collision-disabled visual mesh provides
-the paper-style appearance: smooth shading, colored stone materials, and only
-light millimeter-scale relief. This changes how the stones look in the viewer
-without changing the already validated grasping and stacking dynamics.
+the paper-style appearance: smooth shading, colored stone materials, light
+millimeter-scale relief, and a visual-only granular speckle layer. This changes
+how the stones look in the viewer without changing the already validated
+grasping and stacking dynamics.
 
 The `natural` style is also available:
 

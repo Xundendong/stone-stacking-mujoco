@@ -21,6 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
+from PIL import Image
 import trimesh
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,9 @@ FINGER_CONTACT_GEOMS = (
 DEFAULT_STONE_VISUAL_ROUGHNESS = 0.0025
 DEFAULT_STONE_VISUAL_SUBDIVISIONS = 2
 DEFAULT_STONE_VISUAL_STYLE = "paper"
+DEFAULT_STONE_GRAIN_STRENGTH = 0.38
+DEFAULT_STONE_GRAIN_PARTICLES = 140
+STONE_TEXTURE_DIR = PROJECT_ROOT / "outputs" / "stone_textures"
 PAPER_STONE_PALETTE = (
     (0.92, 0.78, 0.18),
     (0.48, 0.34, 0.58),
@@ -193,6 +197,24 @@ def parse_args() -> argparse.Namespace:
         choices=("paper", "natural"),
         default=DEFAULT_STONE_VISUAL_STYLE,
         help="Visual-only stone material style. paper matches the smooth colored stones used in the reference figures.",
+    )
+    parser.add_argument(
+        "--stone-grain-texture",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply experimental 2D procedural grain textures to visual stone materials. Disabled by default because mesh UVs can stretch.",
+    )
+    parser.add_argument(
+        "--stone-grain-strength",
+        type=float,
+        default=DEFAULT_STONE_GRAIN_STRENGTH,
+        help="Visual grain contrast. 0 disables the granular color variation; 0.25-0.55 is a useful range.",
+    )
+    parser.add_argument(
+        "--stone-grain-particles",
+        type=int,
+        default=DEFAULT_STONE_GRAIN_PARTICLES,
+        help="Number of visual-only dark/light grain speckles placed on each stone surface. Set 0 to disable.",
     )
     parser.add_argument(
         "--no-reset-supply-before-pick",
@@ -393,23 +415,179 @@ def stone_visual_rgba(stone: FlatStone, visual_style: str) -> tuple[float, float
     return tuple(float(value) for value in np.clip(rgb, 0.18, 0.76)) + (1.0,)
 
 
-def stone_visual_material_asset(stone: FlatStone, visual_style: str) -> ET.Element:
+def stone_texture_name(stone: FlatStone) -> str:
+    return f"{stone.name}_grain_tex"
+
+
+def texture_path_for_stone(stone: FlatStone, visual_style: str, grain_strength: float) -> Path:
+    strength_tag = int(round(100.0 * max(0.0, float(grain_strength))))
+    return STONE_TEXTURE_DIR / f"{visual_style}_{stone.name}_grain_s{strength_tag:02d}.png"
+
+
+def _resized_noise(rng: np.random.Generator, size: int, low_size: int) -> np.ndarray:
+    low = rng.normal(0.0, 1.0, size=(low_size, low_size)).astype(np.float32)
+    image = Image.fromarray(low, mode="F")
+    resampling = getattr(Image, "Resampling", Image).BICUBIC
+    high = image.resize((size, size), resample=resampling)
+    return np.asarray(high, dtype=np.float32)
+
+
+def generate_stone_grain_texture(
+    stone: FlatStone,
+    visual_style: str,
+    grain_strength: float,
+    size: int = 256,
+) -> Path:
+    grain_strength = float(np.clip(grain_strength, 0.0, 1.0))
+    path = texture_path_for_stone(stone, visual_style, grain_strength)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    rng = np.random.default_rng(stable_stone_seed(stone) + 83_719)
+    base = np.asarray(stone_visual_rgba(stone, visual_style)[:3], dtype=np.float32)
+    fine = rng.normal(0.0, 1.0, size=(size, size)).astype(np.float32)
+    medium = _resized_noise(rng, size, 48)
+    coarse = _resized_noise(rng, size, 18)
+    grain = 0.58 * fine + 0.30 * medium + 0.12 * coarse
+    grain -= float(grain.mean())
+    grain /= max(float(np.std(grain)), 1.0e-6)
+    grain = np.clip(grain / 2.9, -1.0, 1.0)
+
+    mottle = _resized_noise(rng, size, 13).copy()
+    mottle -= float(mottle.mean())
+    mottle /= max(float(np.std(mottle)), 1.0e-6)
+    mottle = np.clip(mottle / 3.1, -0.9, 0.9)
+
+    rgb = base[None, None, :] * (
+        1.0
+        + 0.34 * grain_strength * grain[:, :, None]
+        + 0.18 * grain_strength * mottle[:, :, None]
+    )
+    warm_shift = rng.normal(0.0, 0.018, size=(size, size, 3)).astype(np.float32)
+    rgb += grain_strength * warm_shift
+
+    dark_specks = rng.random((size, size)) < (0.030 + 0.030 * grain_strength)
+    light_specks = rng.random((size, size)) < (0.008 + 0.010 * grain_strength)
+    rgb[dark_specks] *= 0.55 + 0.18 * rng.random((int(dark_specks.sum()), 1))
+    rgb[light_specks] = rgb[light_specks] * 1.16 + 0.08
+
+    image = np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+    Image.fromarray(image, mode="RGB").save(path)
+    return path
+
+
+def stone_texture_asset(stone: FlatStone, visual_style: str, grain_strength: float) -> ET.Element:
+    texture_path = generate_stone_grain_texture(stone, visual_style, grain_strength)
+    return ET.Element(
+        "texture",
+        {
+            "name": stone_texture_name(stone),
+            "type": "2d",
+            "file": str(texture_path.resolve()),
+        },
+    )
+
+
+def sample_surface_points(
+    stone: FlatStone,
+    count: int,
+    seed_offset: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(stable_stone_seed(stone) + seed_offset)
+    vertices = np.asarray(stone.vertices, dtype=float)
+    faces = np.asarray(stone.faces, dtype=int)
+    triangles = vertices[faces]
+    cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    double_area = np.linalg.norm(cross, axis=1)
+    valid = double_area > 1.0e-12
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=float)
+
+    probabilities = double_area[valid] / float(double_area[valid].sum())
+    valid_indices = np.flatnonzero(valid)
+    chosen = rng.choice(valid_indices, size=count, replace=True, p=probabilities)
+    chosen_triangles = triangles[chosen]
+    chosen_normals = cross[chosen] / np.maximum(double_area[chosen, None], 1.0e-12)
+
+    r1 = np.sqrt(rng.random(count))
+    r2 = rng.random(count)
+    barycentric = np.column_stack((1.0 - r1, r1 * (1.0 - r2), r1 * r2))
+    points = np.einsum("ij,ijk->ik", barycentric, chosen_triangles)
+    return points, chosen_normals
+
+
+def stone_grain_particle_geoms(
+    stone: FlatStone,
+    visual_style: str,
+    grain_strength: float,
+    count: int,
+) -> list[ET.Element]:
+    count = max(0, int(count))
+    grain_strength = float(np.clip(grain_strength, 0.0, 1.0))
+    if count <= 0 or grain_strength <= 0.0:
+        return []
+
+    rng = np.random.default_rng(stable_stone_seed(stone) + 91_337)
+    points, normals = sample_surface_points(stone, count, 91_337)
+    if len(points) == 0:
+        return []
+
+    base = np.asarray(stone_visual_rgba(stone, visual_style)[:3], dtype=float)
+    geoms: list[ET.Element] = []
+    for index, (point, normal) in enumerate(zip(points, normals)):
+        radius = float(rng.uniform(0.00045, 0.00105) * (0.75 + grain_strength))
+        pos = point + normal * (0.0014 + 0.55 * radius)
+        if rng.random() < 0.86:
+            rgb = np.clip(base * rng.uniform(0.42, 0.78), 0.02, 0.88)
+            alpha = float(rng.uniform(0.34, 0.68))
+        else:
+            rgb = np.clip(base * rng.uniform(1.08, 1.28) + 0.04, 0.02, 0.96)
+            alpha = float(rng.uniform(0.26, 0.46))
+        geoms.append(
+            ET.Element(
+                "geom",
+                {
+                    "name": f"{stone.name}_grain_{index:03d}",
+                    "type": "sphere",
+                    "pos": _fmt(pos),
+                    "size": f"{radius:.6g}",
+                    "rgba": _fmt((float(rgb[0]), float(rgb[1]), float(rgb[2]), alpha)),
+                    "contype": "0",
+                    "conaffinity": "0",
+                    "density": "0",
+                    "group": "2",
+                },
+            )
+        )
+    return geoms
+
+
+def stone_visual_material_asset(
+    stone: FlatStone,
+    visual_style: str,
+    use_grain_texture: bool,
+) -> ET.Element:
     if visual_style == "paper":
         specular = "0.14"
         shininess = "0.22"
     else:
         specular = "0.05"
         shininess = "0.12"
-    return ET.Element(
-        "material",
-        {
-            "name": f"{stone.name}_rough_mat",
-            "rgba": _fmt(stone_visual_rgba(stone, visual_style)),
-            "specular": specular,
-            "shininess": shininess,
-            "reflectance": "0.0",
-        },
-    )
+    material = {
+        "name": f"{stone.name}_rough_mat",
+        "rgba": _fmt(stone_visual_rgba(stone, visual_style)),
+        "specular": specular,
+        "shininess": shininess,
+        "reflectance": "0.0",
+    }
+    if use_grain_texture:
+        material.update(
+            {
+                "texture": stone_texture_name(stone),
+                "texrepeat": "5 4",
+                "texuniform": "true",
+            }
+        )
+    return ET.Element("material", material)
 
 
 def stone_visual_mesh_asset(
@@ -498,6 +676,9 @@ def stone_body(
     pos: np.ndarray,
     quat: np.ndarray,
     stone_visual_roughness: float = DEFAULT_STONE_VISUAL_ROUGHNESS,
+    stone_visual_style: str = DEFAULT_STONE_VISUAL_STYLE,
+    stone_grain_strength: float = DEFAULT_STONE_GRAIN_STRENGTH,
+    stone_grain_particles: int = DEFAULT_STONE_GRAIN_PARTICLES,
 ) -> ET.Element:
     body = ET.Element("body", {"name": stone.name, "pos": _fmt(pos), "quat": _fmt(quat)})
     ET.SubElement(body, "freejoint", {"name": f"{stone.name}_free"})
@@ -534,6 +715,13 @@ def stone_body(
                 "group": "2",
             },
         )
+        for geom in stone_grain_particle_geoms(
+            stone,
+            stone_visual_style,
+            stone_grain_strength,
+            stone_grain_particles,
+        ):
+            body.append(geom)
     return body
 
 
@@ -544,6 +732,9 @@ def build_wall_stack_scene(
     stone_visual_roughness: float = DEFAULT_STONE_VISUAL_ROUGHNESS,
     stone_visual_subdivisions: int = DEFAULT_STONE_VISUAL_SUBDIVISIONS,
     stone_visual_style: str = DEFAULT_STONE_VISUAL_STYLE,
+    stone_grain_texture: bool = False,
+    stone_grain_strength: float = DEFAULT_STONE_GRAIN_STRENGTH,
+    stone_grain_particles: int = DEFAULT_STONE_GRAIN_PARTICLES,
 ) -> str:
     _require_asset(UR5E_XML)
     _require_asset(ROBOTIQ_140_XML)
@@ -607,7 +798,10 @@ def build_wall_stack_scene(
     for stone in stones:
         asset.append(stone_mesh_asset(stone))
         if stone_visual_roughness > 0.0:
-            asset.append(stone_visual_material_asset(stone, stone_visual_style))
+            use_grain_texture = stone_grain_texture and stone_grain_strength > 0.0
+            if use_grain_texture:
+                asset.append(stone_texture_asset(stone, stone_visual_style, stone_grain_strength))
+            asset.append(stone_visual_material_asset(stone, stone_visual_style, use_grain_texture))
             asset.append(
                 stone_visual_mesh_asset(
                     stone,
@@ -658,7 +852,17 @@ def build_wall_stack_scene(
 
     for stone in stones:
         pos, quat = initial_poses[stone.name]
-        worldbody.append(stone_body(stone, pos, quat, stone_visual_roughness))
+        worldbody.append(
+            stone_body(
+                stone,
+                pos,
+                quat,
+                stone_visual_roughness,
+                stone_visual_style,
+                stone_grain_strength,
+                stone_grain_particles,
+            )
+        )
 
     actuator = ET.SubElement(root, "actuator")
     for joint_name in UR_JOINTS:
@@ -709,6 +913,9 @@ def prepare(args: argparse.Namespace):
         stone_visual_roughness=args.stone_visual_roughness,
         stone_visual_subdivisions=args.stone_visual_subdivisions,
         stone_visual_style=args.stone_visual_style,
+        stone_grain_texture=args.stone_grain_texture,
+        stone_grain_strength=args.stone_grain_strength,
+        stone_grain_particles=args.stone_grain_particles,
     )
     args.save_xml.parent.mkdir(parents=True, exist_ok=True)
     args.save_xml.write_text(xml, encoding="utf-8")
@@ -1256,6 +1463,9 @@ def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data
             "style": args.stone_visual_style,
             "surface_roughness_m": float(args.stone_visual_roughness),
             "surface_subdivisions": int(args.stone_visual_subdivisions),
+            "grain_texture": bool(args.stone_grain_texture),
+            "grain_strength": float(args.stone_grain_strength),
+            "grain_particles_per_stone": int(args.stone_grain_particles),
             "collision_note": "rough visual meshes are massless and collision-disabled; original convex meshes still provide contact, mass, and friction",
         },
         "control": {
@@ -1292,6 +1502,9 @@ def main() -> int:
                     "stone_visual_style": args.stone_visual_style,
                     "stone_visual_roughness_m": float(args.stone_visual_roughness),
                     "stone_visual_subdivisions": int(args.stone_visual_subdivisions),
+                    "stone_grain_texture": bool(args.stone_grain_texture),
+                    "stone_grain_strength": float(args.stone_grain_strength),
+                    "stone_grain_particles": int(args.stone_grain_particles),
                 },
                 indent=2,
             )
