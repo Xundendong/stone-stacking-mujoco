@@ -227,6 +227,85 @@ def generate_natural_wall_rock(
     )
 
 
+def generate_rough_stackable_rock(
+    name: str,
+    seed: int,
+    length: float,
+    width: float,
+    thickness: float,
+    irregularity: float = 1.0,
+    subdivisions: int = 5,
+    density_range: tuple[float, float] = (1800.0, 2700.0),
+) -> FlatStone:
+    """Generate a visibly rough but still stackable convex rock.
+
+    Compared with ``generate_rock_wall_stone``, this perturbs every subdivision
+    level and adds low-frequency side relief before taking the convex hull. The
+    z-axis perturbation is deliberately smaller than x/y so the rock keeps
+    broad-ish bedding faces for dry stacking instead of becoming too rounded.
+    """
+
+    if not 0.0 < irregularity <= 1.5:
+        raise ValueError("irregularity should be in (0, 1.5]")
+    if subdivisions < 1:
+        raise ValueError("subdivisions must be at least 1")
+    if density_range[0] <= 0.0 or density_range[1] <= density_range[0]:
+        raise ValueError("density_range must be positive and increasing")
+
+    rng = np.random.default_rng(seed)
+    target_extents = np.array([length, width, thickness], dtype=float)
+    mesh = trimesh.creation.box(extents=target_extents)
+    base_scale = target_extents * np.array([0.120, 0.128, 0.026]) * irregularity
+
+    vertices = mesh.vertices.copy()
+    vertices += _truncated_normal_offsets(rng, len(vertices), base_scale)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
+
+    for level in range(subdivisions):
+        mesh = mesh.subdivide()
+        vertices = mesh.vertices.copy()
+        scale = base_scale / (1.85 ** (level + 1))
+        offsets = _truncated_normal_offsets(rng, len(vertices), scale)
+
+        phase = rng.uniform(0.0, 2.0 * np.pi, size=2)
+        side_relief = (
+            np.sin(13.0 * vertices[:, 0] / max(length, 1.0e-9) + phase[0])
+            + 0.75 * np.cos(17.0 * vertices[:, 1] / max(width, 1.0e-9) + phase[1])
+        )
+        radial = vertices.copy()
+        radial[:, 2] = 0.0
+        offsets += radial * (0.006 * irregularity * side_relief[:, None] / (level + 1))
+        vertices += offsets
+        mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
+
+    hull = mesh.convex_hull
+    hull.fix_normals()
+    aligned = _align_to_target_obb(hull, target_extents)
+    volume = max(abs(float(aligned.volume)), 1.0e-9)
+    density = float(rng.uniform(*density_range))
+    mass = density * volume
+
+    shade = float(rng.uniform(0.32, 0.56))
+    warmth = float(rng.uniform(-0.025, 0.055))
+    rgba = (
+        min(0.70, max(0.22, shade + warmth + rng.uniform(-0.020, 0.020))),
+        min(0.68, max(0.22, shade + 0.45 * warmth + rng.uniform(-0.018, 0.018))),
+        min(0.62, max(0.18, shade * rng.uniform(0.78, 0.95))),
+        1.0,
+    )
+
+    return FlatStone(
+        name=name,
+        vertices=[tuple(map(float, vertex)) for vertex in aligned.vertices],
+        faces=[tuple(map(int, face)) for face in aligned.faces],
+        rgba=rgba,
+        mass=mass,
+        length=length,
+        width=width,
+        thickness=thickness,
+    )
+
+
 def make_rock_wall_stones(
     seed: int = 17,
     count: int = 6,
@@ -239,15 +318,22 @@ def make_rock_wall_stones(
     if count <= 0:
         raise ValueError("count must be positive")
     normalized_style = style.strip().lower().replace("_", "-")
-    if normalized_style in {"natural", "rough", "wall-rocks"}:
+    if normalized_style in {"natural", "wall-rocks"}:
         return make_natural_wall_rocks(
             seed=seed,
             count=count,
             irregularity=irregularity,
             subdivisions=subdivisions,
         )
+    if normalized_style in {"rough", "rough-paper", "stackable-rough"}:
+        return make_rough_stackable_wall_rocks(
+            seed=seed,
+            count=count,
+            irregularity=irregularity,
+            subdivisions=subdivisions,
+        )
     if normalized_style not in {"paper", "from-rocks-to-walls", "convex"}:
-        raise ValueError("style must be one of: paper, natural")
+        raise ValueError("style must be one of: paper, rough, natural")
 
     stones: list[FlatStone] = []
     dim_rng = np.random.default_rng(seed * 6151 + 97)
@@ -264,6 +350,41 @@ def make_rock_wall_stones(
         stones.append(
             generate_rock_wall_stone(
                 f"rock_wall_{index + 1:02d}",
+                stone_seed,
+                *dims,
+                irregularity=irregularity,
+                subdivisions=subdivisions,
+            )
+        )
+    return stones
+
+
+def make_rough_stackable_wall_rocks(
+    seed: int = 17,
+    count: int = 6,
+    irregularity: float = 1.0,
+    subdivisions: int = 5,
+) -> list[FlatStone]:
+    """Create rougher From-Rocks-to-Walls-style rocks for robot execution."""
+
+    if count <= 0:
+        raise ValueError("count must be positive")
+
+    stones: list[FlatStone] = []
+    dim_rng = np.random.default_rng(seed * 6151 + 97)
+    for index in range(count):
+        if index < len(ROCK_WALL_TEMPLATES):
+            dims = ROCK_WALL_TEMPLATES[index]
+        else:
+            length = float(dim_rng.uniform(0.135, 0.195))
+            width = float(dim_rng.uniform(0.095, 0.135))
+            thickness = float(dim_rng.uniform(0.062, 0.095))
+            dims = (length, width, thickness)
+
+        stone_seed = seed * 100_003 + index * 9_973 + 131
+        stones.append(
+            generate_rough_stackable_rock(
+                f"rough_wall_{index + 1:02d}",
                 stone_seed,
                 *dims,
                 irregularity=irregularity,

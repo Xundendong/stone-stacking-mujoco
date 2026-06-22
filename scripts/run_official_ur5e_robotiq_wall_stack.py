@@ -94,6 +94,11 @@ def parse_args() -> argparse.Namespace:
         default=math.pi / 2.0,
         help="Additional gripper yaw offset applied on each grasp retry.",
     )
+    parser.add_argument(
+        "--grasp-yaw-overrides",
+        default="",
+        help="Comma-separated one-based placement yaw offsets in radians, e.g. 5:1.5708.",
+    )
     parser.add_argument("--lift-height", type=float, default=0.20)
     parser.add_argument("--approach-height", type=float, default=0.20)
     parser.add_argument(
@@ -127,6 +132,11 @@ def parse_args() -> argparse.Namespace:
         help="For upper-course stones, stop the placement descent after sustained contact with already placed stones.",
     )
     parser.add_argument(
+        "--align-upper-place-orientation",
+        action="store_true",
+        help="For upper-course stones, rotate the gripper after lift so the carried stone matches the planner target orientation.",
+    )
+    parser.add_argument(
         "--place-contact-hold",
         type=float,
         default=0.040,
@@ -137,6 +147,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=2,
         help="Minimum simultaneous support contacts required before contact-aware placement stops descending.",
+    )
+    parser.add_argument(
+        "--place-contact-settle-depth",
+        type=float,
+        default=0.0,
+        help="Extra downward travel after sustained support contact, in meters; useful for lightly seating rough stones.",
     )
     parser.add_argument("--settle-time", type=float, default=0.80)
     parser.add_argument("--speed", type=float, default=1.0)
@@ -199,6 +215,22 @@ def yaw_quat(yaw: float) -> np.ndarray:
     return np.array([math.cos(0.5 * yaw), 0.0, 0.0, math.sin(0.5 * yaw)], dtype=float)
 
 
+def quat_to_mat(q: np.ndarray) -> np.ndarray:
+    w, x, y, z = map(float, q)
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm <= 0.0:
+        return np.eye(3, dtype=float)
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
+
+
 def report_stones(report: dict) -> list[FlatStone]:
     params = report["parameters"]
     return make_rock_wall_stones(
@@ -217,6 +249,24 @@ def parse_index_list(text: str) -> list[int]:
     if any(index < 0 for index in indices):
         raise ValueError("--placement-indices must be non-negative")
     return indices
+
+
+def parse_float_override_map(text: str) -> dict[int, float]:
+    overrides: dict[int, float] = {}
+    if not text.strip():
+        return overrides
+    for chunk in text.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(f"override '{item}' must have the form placement:value")
+        key_text, value_text = item.split(":", 1)
+        key = int(key_text)
+        if key <= 0:
+            raise ValueError("placement override keys are one-based and must be positive")
+        overrides[key] = float(value_text)
+    return overrides
 
 
 def selected_wall_entries(report: dict, args: argparse.Namespace) -> list[dict]:
@@ -524,6 +574,7 @@ def drive_place_descent(
     contact_hold = 0
     max_contacts = 0
     release_site = np.asarray(start_pos, dtype=float).copy()
+    contact_settle_target_z: float | None = None
 
     for step in range(steps):
         t = (step + 1) / steps
@@ -542,9 +593,20 @@ def drive_place_descent(
             include_table=False,
         )
         max_contacts = max(max_contacts, contacts)
+        if contact_settle_target_z is not None:
+            if float(release_site[2]) <= contact_settle_target_z:
+                if viewer is not None:
+                    viewer.sync()
+                    time.sleep(sleep_dt)
+                return q, release_site, True, max_contacts
+            continue
         if contacts >= args.place_contact_min_contacts:
             contact_hold += 1
             if contact_hold >= hold_steps:
+                settle_depth = max(0.0, float(args.place_contact_settle_depth))
+                if settle_depth > 0.0:
+                    contact_settle_target_z = max(float(end_pos[2]), float(release_site[2]) - settle_depth)
+                    continue
                 if viewer is not None:
                     viewer.sync()
                     time.sleep(sleep_dt)
@@ -719,7 +781,8 @@ def execute_entry(
     )
     target_yaw = yaw_from_quat(target_quat)
     grasp_yaw = target_yaw + math.pi / 2.0 + float(entry.get("grasp_yaw_offset", 0.0))
-    target_rot = top_down_gripper_rotation(grasp_yaw)
+    grasp_rot = top_down_gripper_rotation(grasp_yaw)
+    place_rot = grasp_rot
     open_ctrl = (0.0, 0.0)
     close_value = float(np.clip(entry.get("close_override", args.close), 0.0, 0.7))
     close_ctrl = (close_value, -close_value)
@@ -730,7 +793,7 @@ def execute_entry(
         reset_stone_to_supply(mujoco, model, data, entry, stone)
 
     pick_pos, _ = body_pose(model, data, stone.name)
-    pick_site = grip_site_from_pad_center(pick_pos, target_rot)
+    pick_site = grip_site_from_pad_center(pick_pos, grasp_rot)
     above_pick = pick_site + np.array([0.0, 0.0, args.approach_height])
     lift_site = pick_site + np.array([0.0, 0.0, args.lift_height])
 
@@ -743,40 +806,49 @@ def execute_entry(
             ik_data,
             q,
             above_pick,
-            target_rot,
+            grasp_rot,
             open_ctrl,
             viewer,
         )
         step_seconds(mujoco, model, data, 0.15, viewer, args.speed)
     else:
-        q = solve_site_ik(mujoco, model, ik_data, "grip_site", above_pick, target_rot, q, iterations=260)
+        q = solve_site_ik(mujoco, model, ik_data, "grip_site", above_pick, grasp_rot, q, iterations=260)
         data.ctrl[:6] = q
         data.ctrl[6:] = open_ctrl
         step_seconds(mujoco, model, data, 0.25, viewer, args.speed)
 
     q = drive_segment(
-        mujoco, model, data, ik_data, above_pick, pick_site, q, target_rot, open_ctrl, 0.85, viewer, args.speed
+        mujoco, model, data, ik_data, above_pick, pick_site, q, grasp_rot, open_ctrl, 0.85, viewer, args.speed
     )
     q = drive_segment(
-        mujoco, model, data, ik_data, pick_site, pick_site, q, target_rot, close_ctrl, 1.10, viewer, args.speed
+        mujoco, model, data, ik_data, pick_site, pick_site, q, grasp_rot, close_ctrl, 1.10, viewer, args.speed
     )
     closed_pos, _ = body_pose(model, data, stone.name)
     step_seconds(mujoco, model, data, 0.25, viewer, args.speed)
 
     q = drive_segment(
-        mujoco, model, data, ik_data, pick_site, lift_site, q, target_rot, close_ctrl, 1.15, viewer, args.speed
+        mujoco, model, data, ik_data, pick_site, lift_site, q, grasp_rot, close_ctrl, 1.15, viewer, args.speed
     )
     step_seconds(mujoco, model, data, 0.35, viewer, args.speed)
-    lifted_pos, _ = body_pose(model, data, stone.name)
+    lifted_pos, lifted_quat = body_pose(model, data, stone.name)
     lifted_site = data.site_xpos[model.site("grip_site").id].copy()
+    lifted_site_rot = data.site_xmat[model.site("grip_site").id].reshape(3, 3).copy()
     carry_offset = lifted_pos - lifted_site
 
     place_center = target_pos + np.array([0.0, 0.0, place_clearance])
-    place_site = place_center - carry_offset
+    if args.align_upper_place_orientation and course > 0:
+        lifted_object_rot = quat_to_mat(lifted_quat)
+        object_in_site_rot = lifted_site_rot.T @ lifted_object_rot
+        site_to_object_pos = lifted_site_rot.T @ carry_offset
+        place_rot = quat_to_mat(target_quat) @ object_in_site_rot.T
+        place_site = place_center - place_rot @ site_to_object_pos
+        carry_offset = place_center - place_site
+    else:
+        place_site = place_center - carry_offset
     above_place = place_site + np.array([0.0, 0.0, args.approach_height])
 
     q = drive_segment(
-        mujoco, model, data, ik_data, lift_site, above_place, q, target_rot, close_ctrl, 1.25, viewer, args.speed
+        mujoco, model, data, ik_data, lift_site, above_place, q, place_rot, close_ctrl, 1.25, viewer, args.speed
     )
     contact_place_stopped = False
     place_support_contact_count = 0
@@ -793,7 +865,7 @@ def execute_entry(
             above_place,
             place_site,
             q,
-            target_rot,
+            place_rot,
             close_ctrl,
             place_descent_time,
             viewer,
@@ -807,7 +879,7 @@ def execute_entry(
             above_place,
             place_site,
             q,
-            target_rot,
+            place_rot,
             close_ctrl,
             place_descent_time,
             viewer,
@@ -816,7 +888,7 @@ def execute_entry(
     pre_release_pos, _ = body_pose(model, data, stone.name)
 
     q = drive_segment(
-        mujoco, model, data, ik_data, release_site, release_site, q, target_rot, open_ctrl, 0.85, viewer, args.speed
+        mujoco, model, data, ik_data, release_site, release_site, q, place_rot, open_ctrl, 0.85, viewer, args.speed
     )
     set_gripper_contact(model, False)
     step_seconds(mujoco, model, data, args.settle_time, viewer, args.speed)
@@ -831,7 +903,7 @@ def execute_entry(
         release_site,
         retreat_site,
         q,
-        target_rot,
+        place_rot,
         open_ctrl,
         0.70,
         viewer,
@@ -892,6 +964,7 @@ def execute_entry(
 def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data, ik_data, viewer=None) -> dict:
     q = Q_HOME_ELBOW_UP.copy()
     settle_initial_scene(mujoco, model, data, q, 0.65, viewer, args.speed)
+    grasp_yaw_overrides = parse_float_override_map(args.grasp_yaw_overrides)
 
     step_results: list[dict] = []
     placed_names: list[str] = []
@@ -906,8 +979,15 @@ def run_execution(args: argparse.Namespace, mujoco, entries, stones, model, data
         max_attempts = 1 + max(0, int(args.grasp_retries))
         for attempt in range(max_attempts):
             attempt_entry = dict(execution_entry)
-            attempt_entry["close_override"] = float(args.close) + attempt * float(args.grasp_retry_close_step)
-            attempt_entry["grasp_yaw_offset"] = attempt * float(args.grasp_retry_yaw_step)
+            base_yaw_offset = float(execution_entry.get("grasp_yaw_offset", 0.0)) + grasp_yaw_overrides.get(index, 0.0)
+            if attempt == 0:
+                close_step_count = 0
+                yaw_step_count = 0
+            else:
+                close_step_count = 1 + (attempt - 1) // 2
+                yaw_step_count = attempt // 2
+            attempt_entry["close_override"] = float(args.close) + close_step_count * float(args.grasp_retry_close_step)
+            attempt_entry["grasp_yaw_offset"] = base_yaw_offset + yaw_step_count * float(args.grasp_retry_yaw_step)
             q, result = execute_entry(
                 args,
                 mujoco,

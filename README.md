@@ -75,6 +75,12 @@ Implemented:
 - Rear supply-pocket reset before each grasp, keeping unplaced stones away from
   the wall during manipulation.
 - Grasp retry support for difficult stones.
+- Experimental rough-stackable stone style with stronger side relief and
+  flatter bedding faces for more natural-looking generated rocks.
+- Execution-aware planning filters for Robotiq graspability, including maximum
+  candidate width and manual exclusion after failed robot trials.
+- Optional placement yaw overrides and light contact-settling travel for
+  diagnosing release-sensitive upper-course stones.
 - Clean UR5e visualization that preserves robosuite assembled visual meshes and
   hides only robot collision geoms.
 
@@ -216,6 +222,72 @@ placement=8 stone=rock_wall_02 course=2 lifted=0.129 placed=True
 placement=9 stone=rock_wall_01 course=2 lifted=0.104 placed=True
 placement=10 stone=rock_wall_21 course=3 lifted=0.121 placed=True
 ```
+
+## Rough-Stone Experimental Branch
+
+The `rough` stone style is intended to move the generated stones away from
+box-like convex blocks while keeping them plausible for dry stacking. Compared
+with the verified `paper` baseline, it adds stronger side relief and visible
+faceting but keeps the top and bottom bedding directions flatter than the
+`natural` stress-test style.
+
+Generate a rough 10-stone candidate wall with execution-aware filters:
+
+```bash
+python scripts/run_stability_sequence_planner.py \
+  --rock-style rough \
+  --stones 48 \
+  --courses 4,3,2,1 \
+  --samples-per-stone 24 \
+  --max-grasp-mass 2.80 \
+  --max-grasp-width 0.125 \
+  --min-support-bodies 1 \
+  --lower-course-supports-only \
+  --support-count-weight 5.0 \
+  --area-weight 0.040 \
+  --min-support-area 0.002 \
+  --output-json reports/stability_sequence_planner_4_3_2_1_rough_bedded_graspable_48_s24_m28_w125_a002.json \
+  --save-final-xml outputs/stability_sequence_planner_4_3_2_1_rough_bedded_graspable_48_s24_m28_w125_a002.xml
+```
+
+The current rough planner can produce complete `4 + 3 + 2 + 1` reports. Robot
+execution is still experimental: the best full rough-wall runs currently place
+most stones but do not yet produce a verified 10/10 stable wall. A focused
+five-placement test with a placement-5 yaw override is successful:
+
+```bash
+python scripts/run_official_ur5e_robotiq_wall_stack.py \
+  --report reports/stability_sequence_planner_4_3_2_1_rough_bedded_graspable_48_s24_m28_w125_a002.json \
+  --max-placements 5 \
+  --close 0.30 \
+  --grasp-retries 2 \
+  --grasp-retry-close-step 0.04 \
+  --grasp-yaw-overrides 5:1.57079632679 \
+  --upper-place-clearance -0.020 \
+  --upper-place-descent-time 1.65 \
+  --contact-aware-place \
+  --place-contact-settle-depth 0.006 \
+  --settle-time 1.20 \
+  --online-support-correction \
+  --support-correction-gain 0.80 \
+  --max-support-correction 0.050 \
+  --robot-visual clean
+```
+
+Verified rough-branch diagnostic result on the current development setup:
+
+```text
+success: true
+requested_placements: 5
+placed_count: 5
+stacked_count: 5
+```
+
+The current bottleneck is not grasp lifting: the UR5e and Robotiq can lift the
+rough stones. The limiting failure mode is upper-course release sensitivity:
+some rough stones slide along the support surface after the gripper opens. The
+next research step is to make the planner score robot-executable release
+robustness directly, instead of only scoring the settled object pose.
 
 ## Important Execution Parameters
 

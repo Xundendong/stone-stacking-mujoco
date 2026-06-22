@@ -72,9 +72,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wall-y", type=float, default=0.0)
     parser.add_argument(
         "--rock-style",
-        choices=("paper", "natural"),
+        choices=("paper", "rough", "natural"),
         default="paper",
-        help="paper keeps the original convex-hull baseline; natural uses stronger multi-scale surface relief.",
+        help="paper is the original convex-hull baseline; rough adds stackable surface relief; natural is the strongest roughness stress test.",
     )
     parser.add_argument("--rock-irregularity", type=float, default=1.0)
     parser.add_argument("--rock-subdivisions", type=int, default=5)
@@ -83,6 +83,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=3.20,
         help="Exclude stones heavier than this from the robot-executable plan. Use <=0 to disable.",
+    )
+    parser.add_argument(
+        "--max-grasp-width",
+        type=float,
+        default=0.0,
+        help="Exclude stones whose template width exceeds this Robotiq grasp aperture estimate. Use <=0 to disable.",
+    )
+    parser.add_argument(
+        "--exclude-stones",
+        default="",
+        help="Comma-separated stone names to exclude from planning after failed robot execution trials.",
     )
     parser.add_argument("--samples-per-stone", type=int, default=3)
     parser.add_argument("--slot-jitter", type=float, default=0.030)
@@ -108,6 +119,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Minimum unique lower stones contacted by non-ground-course candidates.",
     )
+    parser.add_argument(
+        "--lower-course-supports-only",
+        action="store_true",
+        help="Count only lower-course stones as structural supports for non-ground-course candidates.",
+    )
     parser.add_argument("--shake-time", type=float, default=0.70)
     parser.add_argument("--shake-accel", type=float, default=2.0)
     parser.add_argument("--shake-frequency", type=float, default=2.4)
@@ -129,6 +145,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--area-weight", type=float, default=0.025)
     parser.add_argument("--normal-weight", type=float, default=35.0)
     parser.add_argument("--interlock-weight", type=float, default=18.0)
+    parser.add_argument(
+        "--support-count-weight",
+        type=float,
+        default=0.0,
+        help="Reward candidates that contact more lower-course support stones; default preserves the baseline scoring.",
+    )
     parser.add_argument("--allow-best-effort", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -205,7 +227,11 @@ def count_candidate_supports(
     args: argparse.Namespace,
 ) -> tuple[int, list[str], int]:
     model, data = build_mobile_model_from_result(mujoco, active_stones, selected, args.stone_friction)
-    placed_names = [entry.name for entry in placed]
+    if args.lower_course_supports_only and slot.course > 0:
+        support_entries = [entry for entry in placed if entry.course < slot.course]
+    else:
+        support_entries = placed
+    placed_names = [entry.name for entry in support_entries]
     include_floor_support = slot.course == 0
     contact_count = 0
     support_names: set[str] = set()
@@ -385,6 +411,7 @@ def add_stability_terms(
         + args.area_weight / max(area, args.min_support_area)
         + args.normal_weight * normal_deviation
         + args.interlock_weight * missing_supports
+        - args.support_count_weight * (support_count if slot.course > 0 else 0)
     )
     if not stability_valid:
         stability_cost += 1.0e4
@@ -495,9 +522,14 @@ def main() -> int:
         planning_stones = [stone for stone in all_stones if stone.mass <= args.max_grasp_mass]
     else:
         planning_stones = list(all_stones)
+    if args.max_grasp_width > 0.0:
+        planning_stones = [stone for stone in planning_stones if stone.width <= args.max_grasp_width]
+    excluded_by_name = {name.strip() for name in args.exclude_stones.split(",") if name.strip()}
+    if excluded_by_name:
+        planning_stones = [stone for stone in planning_stones if stone.name not in excluded_by_name]
     if len(planning_stones) < sum(courses):
         raise SystemExit(
-            f"only {len(planning_stones)} stones pass --max-grasp-mass; "
+            f"only {len(planning_stones)} stones pass the graspability filters; "
             f"{sum(courses)} are required"
         )
     if args.dry_run:
@@ -518,6 +550,8 @@ def main() -> int:
                     },
                     "graspability_filter": {
                         "max_grasp_mass_kg": args.max_grasp_mass,
+                        "max_grasp_width_m": args.max_grasp_width,
+                        "manual_excluded_stones": sorted(excluded_by_name),
                         "available_for_planning": [stone.name for stone in planning_stones],
                         "excluded": [
                             stone.name for stone in all_stones if stone.name not in {item.name for item in planning_stones}
@@ -692,6 +726,8 @@ def main() -> int:
             },
             "graspability": {
                 "max_grasp_mass_kg": args.max_grasp_mass,
+                "max_grasp_width_m": args.max_grasp_width,
+                "manual_excluded_stones": sorted(excluded_by_name),
                 "planning_stones": [stone.name for stone in planning_stones],
                 "excluded_stones": [
                     stone.name for stone in all_stones if stone.name not in {item.name for item in planning_stones}
